@@ -1,0 +1,14 @@
+node_modules/
+*.tgz
+state/
+*.log
+*.bak
+*.diff
+dist/
+.npmrc
+__*
+
+# 本机与账号
+.credentials*
+*.pem
+*.key

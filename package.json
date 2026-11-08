@@ -1,0 +1,50 @@
+{
+  "name": "dsh-wangchao",
+  "version": "0.1.0-alpha.1",
+  "type": "module",
+  "description": "DeepSeek Harness plugin: collects cross-session status from an allowlist, with project/session/scope views, on-demand summaries and manual corrections. Observe-only by default.",
+  "author": "Macily Lei",
+  "license": "MIT",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "cross-session",
+    "observability",
+    "dashboard"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MacilyDots/dsh-wangchao.git"
+  },
+  "homepage": "https://github.com/MacilyDots/dsh-wangchao#readme",
+  "bugs": {
+    "url": "https://github.com/MacilyDots/dsh-wangchao/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    },
+    "compat": {
+      "dsh": "0.2.2-rc.1",
+      "note": "Built and tested against DeepSeek Harness 0.2.2-rc.1. Other versions are untested."
+    }
+  }
+}
