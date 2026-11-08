@@ -77,7 +77,7 @@ dsh plugin --profile demo add "file:$asset"
 | `allowManualSummary` | `false` | 只允许摘要预览，不调用模型 |
 | `pollIntervalMs` | `30000` | 每 30 秒检查一次 |
 | `maxSessionsPerPoll` | `10` | 每轮最多处理 10 个会话 |
-| `stateDir` | `<DSH_HOME>/leader` | 插件自己的状态目录 |
+| `stateDir` | `<DSH_HOME>/wangchao` | 插件自己的状态目录 |
 
 `allowSessions` 和 `allowCwds` 是任一命中即可放行，不是同时满足。`excludeSessions` 和 `excludeCwds` 优先于允许规则。
 
@@ -123,7 +123,7 @@ dsh plugin --profile demo add "file:$asset"
 | `excludeCwds` | string[] | `[]` | 排除的目录 |
 | `pollIntervalMs` | number | `30000` | 轮询间隔，最小 5000 毫秒 |
 | `maxSessionsPerPoll` | number | `10` | 单轮最多读取的会话数 |
-| `stateDir` | string | `<DSH_HOME>/leader` | 状态目录 |
+| `stateDir` | string | `<DSH_HOME>/wangchao` | 状态目录 |
 | `allowManualSummary` | boolean | `false` | 是否允许实验性真实摘要 |
 | `summaryProvider` | string | 未设置（真实调用前必须配置） | 摘要 provider |
 | `summaryModel` | string | 未设置（真实调用前必须配置） | 摘要模型 |
