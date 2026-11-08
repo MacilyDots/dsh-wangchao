@@ -1467,8 +1467,8 @@ export async function apply(ctx, config) {
         .map((a) => ({ text: String(a?.text ?? '').slice(0, 200), at: a?.at ?? null, sessionId: a.sessionId })),
       unattributedAdvices: (state.advices ?? []).filter((a) => !a?.sessionId).length,
       source: rows === null
-        ? 'Leader 实时判权失败（无法获取允许列表）'
-        : 'Leader 实时判权后的允许列表（visibleRows：规则过滤 + 撤销剔除）',
+        ? '首辅实时判权失败（无法获取允许列表）'
+        : '首辅实时判权后的允许列表（visibleRows：规则过滤 + 撤销剔除）',
     };
   };
   const chiefBriefText = (b) => [
@@ -1482,7 +1482,7 @@ export async function apply(ctx, config) {
     ...(b.projects.length ? [`项目：${b.projects.map((p) => `${p.name}(${p.sessions})`).join('、')}`] : []),
     `最近建议：${b.advices.length ? b.advices.map((a) => a.text).join('；') : '暂无'}`,
     ...(b.unattributedAdvices > 0 ? [`另有 ${b.unattributedAdvices} 条建议来源待确认，未注入`] : []),
-    '来源：Leader 实时判权后的允许列表；信息可能已过期。',
+    '来源：首辅实时判权后的允许列表；信息可能已过期。',
   ].join('\n');
   // 安装守卫并把状态摘要作为首条消息注入。注入失败不阻断对话，但会在结果与界面上标记。
   const chiefAttach = async (agent, opts = {}) => {
@@ -1987,7 +1987,7 @@ export async function apply(ctx, config) {
   // 后续改用 host.call()（包私有 RPC），或为路由加入 DSH 自身的凭据校验后再恢复。
   disposers.push(ctx.tools.register({
     name: 'wangchao_status',
-    description: '查看 Leader 已采集的允许会话状态：项目归类、事件数、最后活动时间、同步状态、持久化失败。不含被排除或已撤销授权的会话。',
+    description: '查看首辅已采集的允许会话状态：项目归类、事件数、最后活动时间、同步状态、持久化失败。不含被排除或已撤销授权的会话。',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     output: outDef(),
     execute: async () => status(await liveCwdForSummarized()),
@@ -2101,7 +2101,7 @@ export async function apply(ctx, config) {
         let probeDisposer = null;
         try {
           probeDisposer = aTools.register({
-            name: 'chief_probe_write',
+            name: 'wangchao_chief_probe_write',
             description: '首辅自测用受控工具（被调用即计数）',
             parameters: { type: 'object', properties: {}, additionalProperties: false },
             output: outDef(),
@@ -2130,7 +2130,7 @@ export async function apply(ctx, config) {
           }
         };
         const allow = await call('wangchao_detail', { sessionId: sampleId || 'selftest' });
-        const denyProbe = await call('chief_probe_write', {});
+        const denyProbe = await call('wangchao_chief_probe_write', {});
         const denyTag = await call('wangchao_tag', { sessionId: sampleId || 'selftest', project: 'selftest' });
         if (probeDisposer) { try { probeDisposer(); } catch {} }
         checks.push({ check: 'allowRuns', pass: allow.isError === false, detail: allow });
@@ -2309,7 +2309,7 @@ export async function apply(ctx, config) {
 
   disposers.push(ctx.tools.register({
     name: 'wangchao_term',
-    description: 'Leader 任期（轻量）：查看历任，或以新名字开启新任期（上一任自动结束）。不做自动退休判定。',
+    description: '首辅任期（轻量）：查看历任，或以新名字开启新任期（上一任自动结束）。不做自动退休判定。',
     parameters: { type: 'object', properties: { name: { type: 'string' } }, additionalProperties: false },
     output: outDef(),
     execute: async (args) => {

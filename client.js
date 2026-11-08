@@ -1063,7 +1063,7 @@ window.__ModuleLoader__.load({
       // 直接注入 <style>：styles 内置符号在 factory 作用域不可用（实测截图无样式），
       // 浏览器环境下 document 一定存在，这条路不依赖任何服务。
       try {
-        const styleId = 'leader-ui-styles';
+        const styleId = 'wangchao-ui-styles';
         if (!document.getElementById(styleId)) {
           const el = document.createElement('style');
           el.id = styleId;
@@ -1073,7 +1073,7 @@ window.__ModuleLoader__.load({
             return function () {
               try { const n = document.getElementById(styleId); if (n) n.remove(); } catch (e) {}
             };
-          }, 'leader-ui: styles cleanup');
+          }, 'wangchao-ui: styles cleanup');
         }
       } catch (err) {}
       // 卸载/重载时清掉自己设过的 composer block（插件卸载后没人会替我们清）
@@ -1089,19 +1089,19 @@ window.__ModuleLoader__.load({
             chiefBlockApplied = null;
           } catch (e) {}
         };
-      }, 'leader-ui: composer block cleanup');
+      }, 'wangchao-ui: composer block cleanup');
       ctx.effect(function () {
         return slots.inject('main', function () {
-          return slots.register({ name: 'main', key: 'leader', locale: undefined }, View);
+          return slots.register({ name: 'main', key: 'wangchao', locale: undefined }, View);
         });
-      }, 'leader-ui: main panel');
+      }, 'wangchao-ui: main panel');
 
-      // 侧栏入口：点击切换到 leader 面板（main slot 的 key）
+      // 侧栏入口：点击切换到 wangchao 面板（main slot 的 key）
       function PanelIcon() {
         const onClick = function () {
           try {
             const layout = ctx.get('layout');
-            if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('leader');
+            if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('wangchao');
           } catch (err) {}
         };
         return h('div', {
@@ -1115,12 +1115,12 @@ window.__ModuleLoader__.load({
         return slots.inject('sidebar.panellist', function () {
           return slots.register({
             name: 'sidebar.panellist',
-            id: 'leader',
+            id: 'wangchao',
             order: 30,
             label: function () { return '御书房'; },
           }, PanelIcon);
         });
-      }, 'leader-ui: sidebar entry');
+      }, 'wangchao-ui: sidebar entry');
     }
 
     return { name: 'dsh-wangchao', inject: ['slots', 'sessions'], apply };
