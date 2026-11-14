@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.2.0 — 2026-11-15
+
+第二个公开预览：在 0.1 的观察与摘要基座上，加入实时事件流、首辅参议、计划与任务，以及独立窗口。
+
+### 新增功能
+
+- 实时事件流：对允许名单内的活跃会话通过 `sessionController.observeEvent` 建立订阅，冷会话仍由轮询补齐；卸载时刷盘，避免已读事件丢失。
+- 第二版界面：顶栏 + 「总览与对话 / 计划与任务」页签 + 采集范围 / 内阁首辅 / 任务队列三个抽屉。
+- 首辅：召见、打开、关闭、恢复；宿主 `agent/pre-step` 统一判定发送准入；只读守卫验证工具范围。
+- 计划与任务：首辅提议计划、用户确认、派发任务、取消、依赖与证据来源记录。
+- 执行：代码门禁（仅隔离假模型测试配置放行）、本地预算门禁、并行上限。
+- 独立窗口：主机进程拉起 Edge/Chrome `--app` 无边框窗口，加载与侧栏共用同一份 `client.js` 的独立页面；页面地址带启动 token，经连接层认证签发 Cookie。
+- 新增接口：`/api/dsh-wangchao/ui`、`/ui/mini-react.js`、`/ui/client.js`、`/open-standalone`、`/standalone-url`。
+
+### 变更
+
+- `observeOnly` 默认从 `true` 改为 `false`：完整模式；需要观察版时显式设为 `true`。
+- 面板术语调整：项目/对话合并为「总览与对话」，采集范围移入抽屉。
+- 运行时拆分为多个模块：`live-stream.mjs`、`plan-tools.mjs`、`task-store.mjs`、`multi-task.mjs`、`governance.mjs`、`handoff.mjs`、`exec-policy.mjs`、`exec-lifecycle.mjs`。
+
+### 安全默认
+
+- 执行派发入口默认拒绝（要求 `isolatedTestExecution: true` + `fake` 模型）。
+- 预算门禁默认 `budgetLimitUsd: 0`、`budgetPermissions: ['read']`。
+- 独立页面与数据接口一样要求 DSH 认证；无凭据返回 401。
+
+### 已知限制
+
+- 仅在 DeepSeek Harness `0.2.2-rc.3` 上测试。
+- 真实执行链路未验证；执行入口只在隔离假模型测试配置下放行。
+- 首辅对话的权限边界依赖宿主 pre-step，插件不是安全沙箱。
+- 独立窗口依赖本机 Edge/Chrome。
+
 ## 0.1.0-alpha.1 — 2026-11-08
 
 首个公开预览（观察版）。

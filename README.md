@@ -1,6 +1,6 @@
 # dsh-wangchao
 
-`dsh-wangchao` 是 DeepSeek Harness 的跨会话观察插件。它按明确允许的会话名单读取状态，在「御书房」中提供项目、对话和采集范围视图，并支持手动预览摘要、查看来源覆盖和保存人工修订。
+`dsh-wangchao` 是 DeepSeek Harness 的跨会话观察与协作插件。它按明确允许的会话名单读取状态，在「御书房」中提供项目、对话、采集范围和任务视图，并支持手动预览摘要、查看来源覆盖和保存人工修订。
 
 这是一个社区维护的 alpha 项目，不是 DeepSeek 官方插件。
 
@@ -8,33 +8,59 @@
 
 | 项目 | 说明 |
 |---|---|
-| 版本 | `0.1.0-alpha.1` |
-| 定位 | 跨会话观察与人工整理的第一版基座 |
-| 测试环境 | DeepSeek Harness `0.2.2-rc.1` |
+| 版本 | `0.2.0` |
+| 定位 | 跨会话观察、首辅参议与任务调度的第二版 |
+| 测试环境 | DeepSeek Harness `0.2.2-rc.3` |
 | 许可 | MIT |
 
-面板内自称“王朝”，其中的核心角色称“首辅”（内阁首辅）。
+面板内自称「王朝」，其中的核心角色称「首辅」（内阁首辅）。
 
 这是公共测试版本。配置格式、状态文件格式和界面仍可能变化。
 
 ## 当前能做什么
 
+### 采集与视图
+
 - 只读取 `allowSessions` 或 `allowCwds` 命中的会话。
 - 排除规则优先；路径无法解析时拒绝读取。
-- 在「项目」「对话」「采集范围」三个视图中查看会话状态和采集结果。
+- 对活跃会话建立实时事件流（`sessionController.observeEvent`），轮询只补齐冷会话，避免活跃会话重复读取。
+- 在「总览与对话」「计划与任务」两个页签中查看状态；「采集范围」「内阁首辅」「任务队列」以卡片抽屉展开。
 - 手动运行摘要预览，查看实际送入的事件、字符数、截断和成本估算。
 - 显示摘要覆盖情况、部分送入、未覆盖区间和未知结果。
 - 对摘要进行人工修订，新版本追加保存，原摘要保留。
 - 手动给会话写项目标签。
 
+### 首辅
+
+- 召见、打开、关闭、恢复首辅会话；未召见时入口全部拒绝。
+- 首辅发送准入由宿主 `agent/pre-step` 统一判定：关闭、退休、规则收紧、状态不可信一律拒绝。
+- 拒绝原因写入面板与该会话输入框提示，卸载时清理。
+- 首辅只读守卫：在首辅会话上验证工具范围，防止只读角色执行副作用工具。
+
+### 计划与任务
+
+- 首辅提出计划 → 用户在面板确认 → 派发为任务。
+- 任务存储（`task-store.mjs`）与调度器（`multi-task.mjs`）记录来源、确认、执行者、结果和失败原因。
+- 支持取消任务、查看依赖任务、执行约束和证据来源。
+
+### 执行
+
+- 执行入口带代码门禁：默认只在显式启用的隔离假模型测试配置下允许派发（`isolatedTestExecution: true` + `chiefProvider: 'fake'` + `chiefModel: 'fake-1'`），真实环境一律拒绝。
+- 本地预算门禁：`budgetLimitUsd`（默认 0）与 `budgetPermissions`（默认只允许 `read`），只做估算与审计，不是服务商账单硬上限。
+- 并行任务上限由 `maxParallelTasks` 控制。
+
+### 独立窗口
+
+- 面板顶栏提供「打开独立窗口」：由 DSH 主机进程拉起 Edge/Chrome 的 `--app` 无边框窗口，加载独立页面（`/api/dsh-wangchao/ui`）。
+- 独立页面与侧栏面板复用同一份 `client.js`，由内置的迷你 React 渲染，不使用 DSH 侧栏 slot。
+- 独立窗口地址带一次性启动 token，经 DSH 连接层认证后签发 Cookie；无凭据访问返回 401。
+
 装上后不会读取任何会话。需要先在「采集范围」中明确加入目录或会话。
 
 ## 当前不做什么
 
-- 不在后台调用模型。
-- 不自动生成项目报告。
-- 不向其他会话发送消息或指令。
-- 不自动执行任务。
+- 不在后台自动调用模型（除显式配置的真实摘要与首辅对话外）。
+- 不自动执行真实任务（执行入口被代码门禁挡在测试配置内）。
 - 不替用户查找允许名单之外的会话。
 - 不保证摘要内容真实、完整或及时。
 
@@ -42,10 +68,10 @@
 
 ## 安装
 
-先下载 Release 中的 `dsh-wangchao-0.1.0-alpha.1.tgz`。在保存该文件的终端中执行：
+先下载 Release 中的 `dsh-wangchao-0.2.0.tgz`。在保存该文件的终端中执行：
 
 ```powershell
-$asset = Join-Path $env:USERPROFILE "Downloads\dsh-wangchao-0.1.0-alpha.1.tgz"
+$asset = Join-Path $env:USERPROFILE "Downloads\dsh-wangchao-0.2.0.tgz"
 dsh plugin --profile demo add "file:$asset"
 ```
 
@@ -69,19 +95,23 @@ dsh plugin --profile demo add "file:$asset"
 
 | 配置 | 默认值 | 结果 |
 |---|---|---|
-| `observeOnly` | `true` | 首辅相关入口拒绝执行 |
+| `observeOnly` | `false` | 完整模式；设为 `true` 则首辅入口全部拒绝 |
 | `allowSessions` | `[]` | 不按会话放行 |
 | `allowCwds` | `[]` | 不按目录放行 |
 | `excludeSessions` | `[]` | 无额外会话排除 |
 | `excludeCwds` | `[]` | 无额外目录排除 |
 | `allowManualSummary` | `false` | 只允许摘要预览，不调用模型 |
-| `pollIntervalMs` | `30000` | 每 30 秒检查一次 |
+| `pollIntervalMs` | `30000` | 每 30 秒检查一次（最小 5000） |
 | `maxSessionsPerPoll` | `10` | 每轮最多处理 10 个会话 |
+| `maxParallelTasks` | 默认并行任务上限 | 执行调度上限 |
+| `budgetLimitUsd` | `0` | 本地预算门禁 |
+| `budgetPermissions` | `['read']` | 执行只允许只读级操作 |
+| `isolatedTestExecution` | `false` | 执行派发入口默认拒绝 |
 | `stateDir` | `<DSH_HOME>/wangchao` | 插件自己的状态目录 |
 
 `allowSessions` 和 `allowCwds` 是任一命中即可放行，不是同时满足。`excludeSessions` 和 `excludeCwds` 优先于允许规则。
 
-`0.1.x` 只支持观察用途。请保持 `observeOnly: true`。把 `observeOnly` 设为 `false` 会启用尚未完成验证的首辅实验代码，不属于本版本的支持范围。
+执行派发入口默认拒绝；只有显式设置 `isolatedTestExecution: true` 且首辅使用 `fake` 模型时才允许。真实执行链路尚未在正式环境验证，不属于本版本的支持范围。
 
 ## 手动摘要
 
@@ -106,7 +136,7 @@ dsh plugin --profile demo add "file:$asset"
 - 每次读取前重新检查当前会话元数据和授权规则。
 - 候选会话列表只显示会话 ID、路径、创建时间和判定结果，不读取正文。
 - 摘要预览会返回已授权会话的正文。
-- 状态文件是未加密 JSON，内含会话元数据、摘要、标签和人工修订。
+- 状态文件是未加密 JSON，内含会话元数据、摘要、标签、人工修订和任务记录。
 - 撤销授权后，相关内容不再显示，但已保存的摘要和标签仍留在状态文件中。
 - 插件不上传状态文件，也不包含遥测。
 
@@ -116,13 +146,17 @@ dsh plugin --profile demo add "file:$asset"
 
 | 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `observeOnly` | boolean | `true` | 0.1 版本应保持为 `true` |
+| `observeOnly` | boolean | `false` | 设为 `true` 时首辅入口全部拒绝 |
 | `allowSessions` | string[] | `[]` | 允许采集的会话 ID |
 | `allowCwds` | string[] | `[]` | 允许采集的目录 |
 | `excludeSessions` | string[] | `[]` | 排除的会话 ID |
 | `excludeCwds` | string[] | `[]` | 排除的目录 |
 | `pollIntervalMs` | number | `30000` | 轮询间隔，最小 5000 毫秒 |
 | `maxSessionsPerPoll` | number | `10` | 单轮最多读取的会话数 |
+| `maxParallelTasks` | number | 默认上限 | 并行执行任务上限 |
+| `budgetLimitUsd` | number | `0` | 本地预算门禁 |
+| `budgetPermissions` | string[] | `['read']` | 允许的执行级别 |
+| `isolatedTestExecution` | boolean | `false` | 仅隔离测试时开启执行派发 |
 | `stateDir` | string | `<DSH_HOME>/wangchao` | 状态目录 |
 | `allowManualSummary` | boolean | `false` | 是否允许实验性真实摘要 |
 | `summaryProvider` | string | 未设置（真实调用前必须配置） | 摘要 provider |
@@ -131,6 +165,7 @@ dsh plugin --profile demo add "file:$asset"
 | `summaryMaxChars` | number | `6000` | 单次送入字符上限 |
 | `summaryEventMaxChars` | number | `300` | 单条事件的正文截取上限 |
 | `summaryBudgetUsd` | number | `0.03` | 单次请求的本地估算预算 |
+| `chiefProvider` / `chiefModel` | string | 未设置 | 首辅会话使用的模型；未设置时跟随宿主默认 |
 
 在面板中修改采集规则时，服务端会检查规则修订号。两个窗口同时编辑时，较旧的保存会收到冲突提示，不会覆盖较新的规则。
 
@@ -154,28 +189,26 @@ dsh plugin --profile demo remove dsh-wangchao
 
 ## 已知限制
 
-- 只在 DeepSeek Harness `0.2.2-rc.1` 上验证过。
+- 只在 DeepSeek Harness `0.2.2-rc.3` 上验证过。
 - 这是 alpha 版本，接口、配置和数据格式仍可能调整。
-- 首辅真实对话不在 0.1 的支持范围内。
+- 执行派发入口只在隔离假模型测试配置下放行，真实执行链路尚未验证。
+- 首辅对话的权限边界依赖宿主 `agent/pre-step`，插件自身不是安全沙箱。
 - 摘要质量只在一个构造样本上完成过真实调用核对。长会话、多轮压缩和工具密集场景尚未验证。
 - 长事件和长会话可能被截断。预览中的覆盖信息表示实际送入范围，不代表正文语义完整。
 - 自动检查存在轮询延迟。授权会话超过 `maxSessionsPerPoll` 时，一个会话可能需要多个周期才会被检查。
+- 独立窗口依赖本机 Edge 或 Chrome 的 `--app` 模式；两者都不存在时入口不可用。
 - 目前只保证单进程写入状态文件；多进程共享必须在后续版本中解决。
-- 崩溃恢复只覆盖“pending 已写入、主状态尚未提交”的窗口。
+- 崩溃恢复只覆盖「pending 已写入、主状态尚未提交」的窗口。
 - 面板的网络错误处理用测试工具模拟过，真实代理、cookie 和 CORS 组合仍需更多验证。
 - 尚未完成完整类型检查和全仓测试。
 
 ## 这个项目以后要做什么
 
-`0.1` 先解决基础问题：明确允许范围、建立可追溯的会话索引、保存人工确认结果，并让用户看得见哪些内容没有进入摘要。没有这一层，首辅对话和自动协作都会建立在不可靠的数据上。
+`0.2` 在 `0.1` 的观察与摘要基础上，加入了实时事件流、首辅对话、计划与任务调度，以及不依赖 DSH 侧栏的独立窗口。接下来优先做三件事：
 
-接下来优先做三件事：
-
-1. 提高摘要可信度。让摘要区分事实、计划、未完成事项和模型建议，并为每条结论保留事件来源。
+1. 提高摘要与任务结果的可信度。让摘要区分事实、计划、未完成事项和模型建议，并为每条结论保留事件来源。
 2. 增加运行健康观察。记录轮询耗时、失败、积压、更新延迟和资源占用，方便判断问题出在插件、DSH 宿主还是某个大会话。
 3. 完善人工控制。提供摘要纠错、未知请求确认、采集范围撤销和清晰的状态恢复入口。
-
-在数据与权限边界稳定后，再考虑让首辅通过 DSH 原生界面与用户对话。它需要同时满足会话恢复、撤权后停止发送、拒绝原因可见、工具白名单和预算限制。
 
 更后面的方向是由首辅按用户明确授权的任务组织多个执行 Agent，记录分派、回执、来源、成本和验收结果。Agent 的产出必须回到首辅统一判断，不能自行扩大权限，也不能把模型生成的计划当成已经完成的工作。
 

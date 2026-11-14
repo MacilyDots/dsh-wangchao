@@ -2,7 +2,7 @@
  *
  * 数据来源：/api/dsh-wangchao/{overview,sessions}
  * host 侧用 ctx.connection.fetch.register 注册，走 DSH 连接层认证
- * 认证由 DSH 连接层处理。
+ * （实测：无 cookie 401，带 dsh-auth cookie 200）。
  *
  * 硬规则：
  *  1. 状态（syncState）与新鲜度（lastActivityAt / lastSyncAt）分开显示
@@ -30,47 +30,125 @@ window.__ModuleLoader__.load({
       return Math.floor(s / 86400) + ' 天前';
     };
 
+    // 配色令牌：浅色为默认，深色跟随系统（prefers-color-scheme）。
+    // 「玄墨朱批」：深色走 4 级明度台阶（画布 / 卡片面 / 抽屉 / 内凹输入），
+    // 边框用半透明白代替实线灰；语义色三档——青玉=正常，琥珀=待确认，朱砂=缺口与阻断。
+    const PALETTE = {
+      light: {
+        bg: '#faf8f5', surface: '#ffffff', drawer: '#ffffff', inset: '#f5f1eb',
+        fg: '#1f1d1a', fg2: '#1f1d1a', muted: '#6a625a', label: '#6a625a', faint: '#8a827a',
+        border: 'rgba(20,17,14,.10)', border2: 'rgba(20,17,14,.22)', soft: 'rgba(20,17,14,.06)',
+        hover: 'rgba(20,17,14,.04)', selected: 'rgba(20,17,14,.07)',
+        accent: '#b4352c', accentBg: 'rgba(180,53,44,.08)', accentBorder: 'rgba(180,53,44,.28)',
+        warn: '#a16207', warnBg: 'rgba(161,98,7,.10)', warnBorder: 'rgba(161,98,7,.30)',
+        ok: '#0f7a5a', okBg: 'rgba(15,122,90,.10)', okBorder: 'rgba(15,122,90,.30)',
+        mask: 'rgba(20,17,14,.45)', shadow: 'rgba(0,0,0,.14)',
+      },
+      dark: {
+        bg: '#0d0f12', surface: '#14171c', drawer: '#181c23', inset: '#0f1216',
+        fg: '#e8eaed', fg2: '#e8eaed', muted: '#9aa0a6', label: '#9aa0a6', faint: '#6b7280',
+        border: 'rgba(255,255,255,.08)', border2: 'rgba(255,255,255,.18)', soft: 'rgba(255,255,255,.05)',
+        hover: 'rgba(255,255,255,.04)', selected: 'rgba(255,255,255,.07)',
+        accent: '#fca5a5', accentBg: 'rgba(248,113,113,.12)', accentBorder: 'rgba(248,113,113,.32)',
+        warn: '#fbbf24', warnBg: 'rgba(251,191,36,.12)', warnBorder: 'rgba(251,191,36,.32)',
+        ok: '#34d399', okBg: 'rgba(52,211,153,.12)', okBorder: 'rgba(52,211,153,.32)',
+        mask: 'rgba(5,7,10,.62)', shadow: 'rgba(0,0,0,.5)',
+      },
+    };
+    const tokenCss = function (p) {
+      return '--ldr-bg:' + p.bg + ';--ldr-surface:' + p.surface + ';--ldr-drawer:' + p.drawer
+        + ';--ldr-inset:' + p.inset + ';--ldr-fg:' + p.fg + ';--ldr-fg2:' + p.fg2
+        + ';--ldr-muted:' + p.muted + ';--ldr-label:' + p.label + ';--ldr-faint:' + p.faint
+        + ';--ldr-border:' + p.border + ';--ldr-border2:' + p.border2 + ';--ldr-soft:' + p.soft
+        + ';--ldr-hover:' + p.hover + ';--ldr-selected:' + p.selected
+        + ';--ldr-accent:' + p.accent + ';--ldr-accent-bg:' + p.accentBg + ';--ldr-accent-border:' + p.accentBorder
+        + ';--ldr-warn:' + p.warn + ';--ldr-warn-bg:' + p.warnBg + ';--ldr-warn-border:' + p.warnBorder
+        + ';--ldr-ok:' + p.ok + ';--ldr-ok-bg:' + p.okBg + ';--ldr-ok-border:' + p.okBorder
+        + ';--ldr-mask:' + p.mask + ';--ldr-shadow:' + p.shadow;
+    };
     const CSS = [
-      '.ldr-wrap{font:13px/1.6 ui-sans-serif,system-ui,-apple-system,sans-serif;padding:18px 20px;color:#2a2724;background:#faf8f5;min-height:100%;overflow:auto}',
+      // 令牌挂在 .ldr-layout 上：.ldr-wrap 和抽屉都在它下面，变量继承得到。
+      '.ldr-layout{display:flex;align-items:stretch;min-height:100%;color-scheme:light;font-variant-numeric:tabular-nums;' + tokenCss(PALETTE.light) + '}',
+      '@media (prefers-color-scheme: dark){.ldr-layout{color-scheme:dark;' + tokenCss(PALETTE.dark) + '}}',
+      '.ldr-wrap{font:13px/1.6 "Segoe UI","Microsoft YaHei UI",system-ui,-apple-system,sans-serif;padding:18px 20px;color:var(--ldr-fg);background:var(--ldr-bg);min-height:100%;overflow:auto}',
       '.ldr-sec{margin-bottom:22px}',
-      '.ldr-h{font-weight:600;font-size:13px;letter-spacing:.02em;margin-bottom:8px;color:#3a3530}',
+      '.ldr-h{font-weight:600;font-size:12px;letter-spacing:.04em;margin-bottom:8px;color:var(--ldr-muted)}',
       '.ldr-table{width:100%;border-collapse:collapse}',
-      '.ldr-table th{text-align:left;font-weight:500;font-size:12px;color:#8a827a;border-bottom:1px solid #e6e0d8;padding:6px 8px;white-space:nowrap}',
-      '.ldr-table td{padding:7px 8px;border-bottom:1px solid #f0ebe4;vertical-align:top}',
+      '.ldr-table th{text-align:left;font-weight:500;font-size:12px;color:var(--ldr-faint);border-bottom:1px solid var(--ldr-border);padding:8px 14px;white-space:nowrap}',
+      '.ldr-table td{padding:12px 14px;border-bottom:1px solid var(--ldr-soft);vertical-align:top}',
       '.ldr-num{font-variant-numeric:tabular-nums}',
-      '.ldr-warn{color:#a8443a}',
-      '.ldr-dim{color:#8a827a;font-size:12px}',
+      '.ldr-warn{color:var(--ldr-accent)}',
+      '.ldr-dim{color:var(--ldr-faint);font-size:12px}',
       '.ldr-title{font-weight:500;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.ldr-unavail{opacity:.62}',
-      '.ldr-edited{color:#a8443a;font-weight:500}',
-      '.ldr-unavail td{border-bottom:1px dashed #d8d0c6}',
-      '.ldr-empty{color:#8a827a;padding:24px 8px;text-align:center}',
-      '.ldr-err{border:1px solid #e0c8c4;background:#fdf4f2;padding:10px 12px;border-radius:6px;margin-bottom:14px;color:#7a2f28}',
-      '.ldr-btn{margin-top:6px;padding:3px 10px;border:1px solid #d8d0c6;background:#fff;border-radius:4px;cursor:pointer;font:inherit}',
-      '.ldr-foot{padding-top:10px;border-top:1px solid #f0ebe4;color:#8a827a;font-size:12px}',
-      '.ldr-chat{margin-top:20px;padding-top:14px;border-top:1px solid #e6e0d8;color:#8a827a;font-size:12px}',
+      '.ldr-unavail{opacity:.65}',
+      '.ldr-edited{color:var(--ldr-warn);font-weight:500}',
+      '.ldr-unavail td{border-bottom:1px dashed var(--ldr-border2)}',
+      '.ldr-empty{color:var(--ldr-faint);padding:24px 8px;text-align:center}',
+      '.ldr-err{border:1px solid var(--ldr-accent-border);background:var(--ldr-accent-bg);padding:10px 12px;border-radius:10px;margin-bottom:14px;color:var(--ldr-accent)}',
+      // 按钮统一 30px 高、6px 圆角、按内容宽，不再被列向 flex 拉满
+      '.ldr-btn,.ldr-toggle,.ldr-primary,.ldr-danger{display:inline-flex;align-items:center;justify-content:center;height:30px;padding:0 12px;border-radius:6px;font:inherit;font-size:12px;cursor:pointer;width:fit-content}',
+      '.ldr-btn{border:1px solid var(--ldr-border);background:var(--ldr-surface);color:var(--ldr-fg)}',
+      '.ldr-btn:hover{border-color:var(--ldr-border2)}',
       '@media (max-width:1100px){.ldr-wrap{padding:12px}.ldr-table{min-width:600px}.ldr-title{max-width:160px}}',
       '.ldr-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}',
-      '.ldr-layout{display:flex;align-items:stretch;min-height:100%}',
       '.ldr-main{flex:1;min-width:0}',
-      '.ldr-chatpanel{flex:0 0 0;width:0;overflow:hidden;transition:width .18s ease;border-left:0 solid #e6e0d8}',
-      '.ldr-chatpanel.open{width:320px;flex:0 0 320px;border-left-width:1px}',
-      '.ldr-chathead{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid #f0ebe4;font-weight:600;font-size:12px}',
-      '.ldr-chatbody{padding:12px 10px;color:#8a827a;font-size:12px}',
-      '.ldr-toggle{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border:1px solid #d8d0c6;background:#fff;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;color:#3a3530}',
-      '.ldr-toggle:hover{background:#f5f1eb}',
-      '.ldr-tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid #e6e0d8}',
-      '.ldr-tab{padding:5px 12px;border:1px solid transparent;border-bottom:none;background:none;cursor:pointer;font:inherit;color:#8a827a;border-radius:4px 4px 0 0}',
-      '.ldr-tab.on{background:#fff;border-color:#e6e0d8;color:#2a2724;font-weight:600}',
-      '.ldr-field{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}',
-      '.ldr-label{font-size:12px;color:#6a625a;font-weight:500}',
-      '.ldr-textarea{width:100%;min-height:64px;border:1px solid #d8d0c6;border-radius:4px;padding:6px 8px;font:12px/1.5 ui-monospace,monospace;background:#fff;resize:vertical}',
-      '.ldr-note{font-size:12px;color:#8a827a;margin-bottom:10px}',
+      '.ldr-toggle{border:1px solid var(--ldr-border);background:transparent;color:var(--ldr-muted)}',
+      '.ldr-toggle:hover{border-color:var(--ldr-border2);color:var(--ldr-fg);background:var(--ldr-hover)}',
+      '.ldr-toggle[disabled],.ldr-btn[disabled]{opacity:.5;cursor:default}',
+      '.ldr-tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid var(--ldr-border)}',
+      '.ldr-tab{padding:6px 12px;border:1px solid transparent;border-bottom:none;background:none;cursor:pointer;font:inherit;font-size:12px;color:var(--ldr-faint);border-radius:6px 6px 0 0}',
+      '.ldr-tab.on{color:var(--ldr-fg);font-weight:600;background:var(--ldr-surface);border-color:var(--ldr-border)}',
+      '.ldr-field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}',
+      // 列向 flex 会把按钮拉成整行宽；按钮在 .ldr-field 里一律按内容宽左对齐
+      '.ldr-field > button{margin-top:6px;align-self:flex-start}',
+      '.ldr-label{font-size:12px;color:var(--ldr-label);font-weight:500;letter-spacing:.02em}',
+      '.ldr-textarea{width:100%;min-height:64px;border:1px solid var(--ldr-border);border-radius:6px;padding:8px 10px;font:12px/1.5 "Cascadia Mono","Consolas",ui-monospace,monospace;background:var(--ldr-inset);color:var(--ldr-fg);resize:vertical}',
+      '.ldr-note{font-size:12px;color:var(--ldr-muted);margin-bottom:10px}',
       '.ldr-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}',
-      '.ldr-primary{padding:5px 14px;border:1px solid #3a6b52;background:#3a6b52;color:#fff;border-radius:4px;cursor:pointer;font:inherit}',
+      '.ldr-primary{border:1px solid var(--ldr-ok-border);background:var(--ldr-ok-bg);color:var(--ldr-ok);font-weight:500}',
+      '.ldr-primary:hover{border-color:var(--ldr-ok)}',
       '.ldr-primary[disabled]{opacity:.5;cursor:default}',
-      '.ldr-danger{padding:5px 12px;border:1px solid #c9a29c;background:#fff;color:#7a2f28;border-radius:4px;cursor:pointer;font:inherit}',
-      '@media (max-width:1100px){.ldr-chatpanel.open{position:fixed;right:0;top:0;bottom:0;width:320px;z-index:9998;background:#faf8f5;box-shadow:-2px 0 12px rgba(0,0,0,.12)}}',
+      '.ldr-danger{border:1px solid var(--ldr-accent-border);background:transparent;color:var(--ldr-accent)}',
+      '.ldr-danger:hover{background:var(--ldr-accent-bg)}',
+      '.ldr-topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;margin-bottom:12px;border-bottom:1px solid var(--ldr-border);background:var(--ldr-bg)}',
+      '.ldr-brand{font-size:14px;font-weight:700;letter-spacing:.02em;color:var(--ldr-fg)}',
+      '.ldr-led{display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:-4px;vertical-align:1px}',
+      '.ldr-led.ok{background:var(--ldr-ok);box-shadow:0 0 0 3px var(--ldr-ok-bg)}',
+      '.ldr-led.warn{background:var(--ldr-warn);box-shadow:0 0 0 3px var(--ldr-warn-bg)}',
+      '.ldr-chip{display:inline-flex;align-items:baseline;gap:4px;padding:3px 9px;border:1px solid var(--ldr-border);border-radius:6px;background:var(--ldr-surface);font-size:12px;color:var(--ldr-muted);white-space:nowrap}',
+      '.ldr-chip b{color:var(--ldr-fg);font-weight:600}',
+      '.ldr-chip.warn{border-color:var(--ldr-warn-border);background:var(--ldr-warn-bg);color:var(--ldr-warn)}',
+      '.ldr-chip.warn b{color:var(--ldr-warn)}',
+      '.ldr-spacer{flex:1 1 auto}',
+      '.ldr-cols{display:grid;grid-template-columns:290px minmax(0,1fr);gap:16px;align-items:start}',
+      // 会话多到要滚动时，左栏三卡吸在顶栏下面
+      '.ldr-col-side{display:flex;flex-direction:column;gap:10px;position:sticky;top:58px;align-self:start}',
+      '.ldr-col-main{min-width:0}',
+      '.ldr-card{display:flex;flex-direction:column;justify-content:flex-start;align-items:stretch;width:100%;text-align:left;border:1px solid var(--ldr-border);border-radius:10px;background:var(--ldr-surface);padding:12px 14px;cursor:pointer;font:inherit;color:inherit;transition:border-color .12s ease,transform .12s ease,box-shadow .12s ease}',
+      '.ldr-card:hover{border-color:var(--ldr-border2);transform:translateY(-1px);box-shadow:0 4px 14px var(--ldr-shadow)}',
+      // 告警语义：左侧 3px 竖线比右上角红圈更像工程台
+      '.ldr-card.ldr-card-warn{box-shadow:inset 3px 0 0 var(--ldr-warn)}',
+      '.ldr-card.ldr-card-err{box-shadow:inset 3px 0 0 var(--ldr-accent)}',
+      '.ldr-card.ldr-card-warn:hover{box-shadow:inset 3px 0 0 var(--ldr-warn),0 4px 14px var(--ldr-shadow)}',
+      '.ldr-card.ldr-card-err:hover{box-shadow:inset 3px 0 0 var(--ldr-accent),0 4px 14px var(--ldr-shadow)}',
+      '.ldr-card-title{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:12px;font-weight:600;color:var(--ldr-fg);margin-bottom:8px}',
+      '.ldr-badge{min-width:20px;padding:0 6px;border-radius:999px;background:var(--ldr-warn-bg);border:1px solid var(--ldr-warn-border);color:var(--ldr-warn);font-size:11px;line-height:16px;text-align:center;font-weight:600}',
+      '.ldr-card-line{font-size:12px;color:var(--ldr-muted);line-height:1.7;overflow-wrap:anywhere}',
+      '.ldr-table-wrap{overflow-x:auto;border-top:1px solid var(--ldr-border)}',
+      // cwd 不设上限会把「会话」列撑到占满整行，摘要列被挤成三行
+      '.ldr-ellipsis{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.ldr-rowbtn{cursor:pointer}',
+      '.ldr-rowbtn:hover td{background:var(--ldr-hover)}',
+      '.ldr-rowbtn.on td{background:var(--ldr-selected)}',
+      '.ldr-chevron{color:var(--ldr-faint);font-weight:400}',
+      '.ldr-card:hover .ldr-chevron{color:var(--ldr-fg)}',
+      '.ldr-warncount{display:inline-block;min-width:20px;padding:0 6px;margin-top:4px;border-radius:999px;background:var(--ldr-accent-bg);border:1px solid var(--ldr-accent-border);color:var(--ldr-accent);font-size:11px;line-height:16px;text-align:center;font-weight:600;cursor:help}',
+      '.ldr-drawer-mask{position:fixed;inset:0;z-index:9990;background:var(--ldr-mask);backdrop-filter:blur(2px)}',
+      '.ldr-drawer{position:fixed;top:0;right:0;bottom:0;z-index:9991;width:min(560px,92vw);overflow:auto;background:var(--ldr-drawer);border-left:1px solid var(--ldr-border2);box-shadow:-12px 0 32px var(--ldr-shadow);padding:0 18px 40px}',
+      '.ldr-drawer-head{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:14px 0;margin-bottom:14px;background:var(--ldr-drawer);border-bottom:1px solid var(--ldr-border);font-size:16px;font-weight:700;color:var(--ldr-fg)}',
+      '.ldr-json{margin-top:14px}',
+      '.ldr-json pre{margin:6px 0 0;padding:10px;background:var(--ldr-inset);border:1px solid var(--ldr-border);border-radius:6px;font:11px/1.55 "Cascadia Mono","Consolas",ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;max-height:280px;overflow:auto}',
+      '@media (max-width:1100px){.ldr-cols{grid-template-columns:1fr}.ldr-col-side{position:static;flex-direction:row;flex-wrap:wrap}.ldr-col-side .ldr-card{flex:1 1 280px}.ldr-ellipsis{max-width:200px}.ldr-title{max-width:200px}}',
     ].join('\n');
 
     function buildOverviewSection(ov) {
@@ -101,11 +179,47 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'ldr-sec' }, head, h('div', { className: 'ldr-scroll' }, h('table', { className: 'ldr-table' }, th, h('tbody', null, trs))));
     }
 
-    function buildSessionsSection(rows, openSummary) {
+    // 单个会话的失败与覆盖缺口：表格里只给 ⚠N（hover 出全文），抽屉里逐条展开。
+    // 文案与旧表格逐字一致，不因为折叠就降低措辞强度。
+    function sessionWarnings(s) {
+      const out = [];
+      if (!s.available) out.push('未在会话索引中列出（可能已删除，或索引暂未同步）');
+      if (s.error) out.push('读取失败：' + s.error);
+      const cov = s.summaryState || null;
+      if (cov && typeof cov.denied === 'string') {
+        const deniedText = cov.denied === 'out-of-scope' ? '当前不在采集范围'
+          : (cov.denied === 'metadata-unavailable' ? '取不到最新的会话元数据'
+            : (cov.denied === 'not-checked' ? '未做实时校验' : '状态未知'));
+        out.push('无法显示覆盖详情：' + deniedText);
+      } else if (cov) {
+        // 缺口、部分送入、待确认都必须直接显示，不能用一句「已摘要」盖住。
+        if (cov.partialCount > 0) out.push('部分送入：' + cov.partialCount + ' 条只送了前缀，缺 ' + cov.lostChars + ' 字');
+        if (cov.gapRanges && cov.gapRanges !== '无') out.push('未覆盖 seq：' + cov.gapRanges);
+        // 进程内「模型已返回但结果没保存」：与「还在等结果」必须分开显示
+        const unsaved = (Array.isArray(cov.runs) ? cov.runs : []).filter(function (r) { return r && r.unsaved; });
+        if (unsaved.length > 0) out.push('模型已返回但结果未保存（可能已计费）：' + unsaved.length + ' 次');
+        if (cov.unknownCount > 0) {
+          out.push('待确认 ' + cov.unknownCount + ' 段：已发出但结果未知，可能已计费，不自动重发'
+            + (cov.unknownAckCount > 0 ? '（其中 ' + cov.unknownAckCount + ' 段已人工确认，缺口仍保留）' : ''));
+        }
+        if (cov.runsTrimmed && cov.runsTrimmed.count > 0) out.push('运行历史已裁剪 ' + cov.runsTrimmed.count + ' 条（未解决的记录不裁剪）');
+      }
+      return out;
+    }
+
+    function sessionCoverageText(s) {
+      const cov = s.summaryState || null;
+      if (!cov || typeof cov.denied === 'string') return null;
+      return '覆盖 ' + cov.coveredCount + ' 条（完整 ' + cov.fullCount + ' / 部分 ' + cov.partialCount + '）';
+    }
+
+    function buildSessionsSection(rows, openSession, activeId) {
       const avail = rows.filter(function (r) { return r.available; });
       const unavail = rows.filter(function (r) { return !r.available; });
-      const label = '项目对话（' + avail.length + ' 可用' + (unavail.length ? ' / ' + unavail.length + ' 待确认' : '') + '）';
-      const head = h('div', { className: 'ldr-h' }, label);
+      const head = h('div', { className: 'ldr-h' },
+        '会话（' + avail.length + ' 可用' + (unavail.length ? ' / ' + unavail.length + ' 待确认' : '') + '）',
+        h('span', { className: 'ldr-dim', style: { fontWeight: 400, marginLeft: 8 } },
+          '点任意一行查看详情、覆盖缺口与摘要版本'));
       if (rows.length === 0) {
         return h('section', { className: 'ldr-sec' }, head, h('div', { className: 'ldr-empty' }, '暂无会话'));
       }
@@ -113,97 +227,54 @@ window.__ModuleLoader__.load({
         h('th', null, '会话'), h('th', null, '状态'),
         h('th', null, '摘要'), h('th', null, '最近活动'), h('th', null, '最后同步')));
       const trs = rows.map(function (s) {
-        const titleCell = h('td', null,
-          h('div', { className: 'ldr-title', title: s.id }, s.title || s.id.slice(0, 26)),
-          h('div', { className: 'ldr-dim', title: s.cwd || '' }, s.cwd || ''));
-        const statusCell = h('td', null,
-          h('div', null, s.syncState),
-          s.available
-            ? h('div', { className: 'ldr-dim' }, (s.events == null ? '?' : s.events) + ' 事件')
-            : h('div', { className: 'ldr-dim' }, '未在会话索引中列出（可能已删除，或索引暂未同步）'));
-        const activityCell = h('td', { className: 'ldr-dim' }, agoText(s.lastActivityAt));
-        const syncCell = h('td', { className: 'ldr-dim' },
-          s.available
-            ? (s.lastSyncAt ? timeText(s.lastSyncAt) : '从未成功同步')
-            : '最后成功同步 ' + (s.lastSyncAt ? timeText(s.lastSyncAt) : '无记录'));
         const versions = Array.isArray(s.summaries) ? s.summaries : [];
         const latest = versions.length ? versions[versions.length - 1] : null;
-        // 摘要覆盖：只反映「实际送入」的记录，不是「模型已正确总结」。
-        // 缺口、部分送入、待确认都必须直接显示，不能用一句「已摘要」盖住。
-        const cov = s.summaryState || null;
-        // denied 也是真值，但没有覆盖字段：必须先分支处理，否则会渲染成「覆盖 undefined 条」
-        const covDenied = cov && typeof cov.denied === 'string' ? cov.denied : null;
-        const deniedText = covDenied === 'out-of-scope' ? '当前不在采集范围'
-          : (covDenied === 'metadata-unavailable' ? '取不到最新的会话元数据'
-            : (covDenied === 'not-checked' ? '未做实时校验' : '状态未知'));
-        const gapText = cov && cov.gapRanges && cov.gapRanges !== '无'
-          ? (cov.gapRanges.length > 120 ? cov.gapRanges.slice(0, 120) + '…' : cov.gapRanges)
-          : null;
-        // 进程内「模型已返回但结果没保存」：与「还在等结果」必须分开显示
-        const unsavedList = (cov && Array.isArray(cov.runs) ? cov.runs : []).filter(function (r) { return r && r.unsaved; });
-        const covLine = cov
-          ? (covDenied
-            ? h('div', { style: { marginTop: 3 } },
-                h('div', { className: 'ldr-warn', style: { fontSize: 11 } },
-                  '无法显示覆盖详情：' + deniedText))
-            : h('div', { style: { marginTop: 3 } },
-              h('div', { className: 'ldr-dim', style: { fontSize: 11 } },
-                '覆盖 ' + cov.coveredCount + ' 条（完整 ' + cov.fullCount + ' / 部分 ' + cov.partialCount + '）'),
-              cov.partialCount > 0
-                ? h('div', { className: 'ldr-warn', style: { fontSize: 11 } },
-                    '部分送入：' + cov.partialCount + ' 条只送了前缀，缺 ' + cov.lostChars + ' 字')
-                : null,
-              gapText
-                ? h('div', { className: 'ldr-dim', style: { fontSize: 11 }, title: cov.gapRanges }, '未覆盖 seq：' + gapText)
-                : null,
-              unsavedList.length > 0
-                ? h('div', { className: 'ldr-warn', style: { fontSize: 11, fontWeight: 500 } },
-                    '模型已返回但结果未保存（可能已计费）：' + unsavedList.length + ' 次')
-                : null,
-              cov.unknownCount > 0
-                ? h('div', { className: 'ldr-warn', style: { fontSize: 11 } },
-                    '待确认 ' + cov.unknownCount + ' 段：已发出但结果未知，可能已计费，不自动重发'
-                    + (cov.unknownAckCount > 0
-                      ? '（其中 ' + cov.unknownAckCount + ' 段已人工确认，缺口仍保留）'
-                      : ''))
-                : null,
-              cov.runsTrimmed && cov.runsTrimmed.count > 0
-                ? h('div', { className: 'ldr-dim', style: { fontSize: 11 }, title: (cov.runsTrimmed.lastDroppedRunIds || []).join(', ') },
-                    '运行历史已裁剪 ' + cov.runsTrimmed.count + ' 条（未解决的记录不裁剪）')
-                : null))
-          : null;
-        const summaryCell = versions.length === 0
-          ? h('td', { className: 'ldr-dim' },
-              '无',
-              covLine,
-              h('button', { className: 'ldr-btn', onClick: function () { openSummary(s.id); } }, '版本'))
-          : h('td', null,
-              h('div', null,
-                versions.length + ' 版',
-                latest && latest.edited
-                  ? h('span', { className: 'ldr-edited' }, ' 最新：人工修订')
-                  : h('span', { className: 'ldr-dim' }, ' 最新：模型生成')),
-              latest
-                ? h('div', { className: 'ldr-dim', title: latest.sourceNote },
-                    '来源 seq ' + latest.fromSeq + '–' + latest.toSeq +
-                    (latest.edited ? '（继承自原摘要）' : ''))
-                : null,
-              latest && latest.edited
-                ? h('div', { className: 'ldr-warn', style: { fontSize: 11 } },
-                    '人工修订内容不代表逐句都有事件支持')
-                : null,
-              covLine,
-              h('button', { className: 'ldr-btn', onClick: function () { openSummary(s.id); } }, '版本 / 修订'));
-        return h('tr', { key: s.id, className: s.available ? '' : 'ldr-unavail' },
-          titleCell, statusCell, summaryCell, activityCell, syncCell);
+        const warn = sessionWarnings(s);
+        const cover = sessionCoverageText(s);
+        const summaryCell = h('td', null,
+          h('div', { className: 'ldr-dim' },
+            versions.length === 0 ? '无摘要' : (versions.length + ' 版'),
+            versions.length === 0 ? null
+              : (latest && latest.edited
+                ? h('span', { className: 'ldr-edited' }, ' · 最新：人工修订')
+                : h('span', null, ' · 最新：模型生成'))),
+          cover ? h('div', { className: 'ldr-dim' }, cover) : null,
+          warn.length
+            ? h('div', null,
+                h('span', {
+                  className: 'ldr-warncount',
+                  title: warn.join('\n') + '\n\n点开此行查看全文',
+                }, '⚠' + warn.length))
+            : null);
+        return h('tr', {
+          key: s.id,
+          className: 'ldr-rowbtn' + (s.available ? '' : ' ldr-unavail') + (activeId === s.id ? ' on' : ''),
+          title: warn.length ? warn.join('\n') : s.id,
+          onClick: function () { openSession(s.id); },
+        },
+          h('td', null,
+            h('div', { className: 'ldr-title', title: s.id }, s.title || s.id.slice(0, 26)),
+            h('div', { className: 'ldr-dim ldr-ellipsis', title: s.cwd || '' }, s.cwd || '')),
+          h('td', null,
+            h('div', null, s.syncState),
+            h('div', { className: 'ldr-dim' }, s.available
+              ? (s.events == null ? '?' : s.events) + ' 事件'
+              : '未在会话索引中列出（可能已删除，或索引暂未同步）')),
+          summaryCell,
+          h('td', { className: 'ldr-dim' }, agoText(s.lastActivityAt)),
+          h('td', { className: 'ldr-dim' }, s.available
+            ? (s.lastSyncAt ? timeText(s.lastSyncAt) : '从未成功同步')
+            : '最后成功同步 ' + (s.lastSyncAt ? timeText(s.lastSyncAt) : '无记录')));
       });
-      return h('section', { className: 'ldr-sec' }, head, h('div', { className: 'ldr-scroll' }, h('table', { className: 'ldr-table' }, th, h('tbody', null, trs))));
+      return h('section', { className: 'ldr-sec' }, head,
+        h('div', { className: 'ldr-table-wrap' }, h('table', { className: 'ldr-table' }, th, h('tbody', null, trs))));
     }
 
     function buildSummaryPanel(panel, edit, busy, msg, selected, onEdit, onClose, onSelect, onSubmit) {
       const head = h('div', { className: 'ldr-h' },
         '摘要版本 · ' + (panel.sessionId || ''),
-        h('button', { className: 'ldr-btn', style: { marginLeft: 8 }, onClick: onClose }, '关闭'));
+        // 在抽屉里运行时由抽屉自己提供关闭入口，避免同一个位置出现两个「关闭」
+        onClose ? h('button', { className: 'ldr-btn', style: { marginLeft: 8 }, onClick: onClose }, '关闭') : null);
       if (panel.loading) return h('section', { className: 'ldr-sec' }, head, h('div', { className: 'ldr-empty' }, '读取中…'));
       if (panel.error) return h('section', { className: 'ldr-sec' }, head, h('div', { className: 'ldr-err' }, '读取失败：' + panel.error));
       const d = panel.data || {};
@@ -225,7 +296,7 @@ window.__ModuleLoader__.load({
         const isEdited = v.edited === true;
         const src = v.source || null;
         const sentCount = Array.isArray(v.sentSeqs) ? v.sentSeqs.length : null;
-        return h('div', { key: v.id || idx, className: 'ldr-field', style: { borderTop: '1px solid #f0ebe4', paddingTop: 8 } },
+        return h('div', { key: v.id || idx, className: 'ldr-field', style: { borderTop: '1px solid var(--ldr-soft)', paddingTop: 8 } },
           h('div', { className: 'ldr-row' },
             h('span', { className: isEdited ? 'ldr-edited' : 'ldr-dim' }, isEdited ? '人工修订' : '模型生成'),
             h('span', { className: 'ldr-dim' }, timeText(v.at)),
@@ -252,26 +323,29 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'ldr-sec' }, head,
         staleBanner,
         msg ? h('div', { className: msg.kind === 'ok' ? 'ldr-note' : 'ldr-err' }, msg.text) : null,
-        h('div', { className: 'ldr-field' },
-          h('div', { className: 'ldr-label' }, '人工修订（追加新版本到本地状态，不覆盖原摘要）'),
-          h('textarea', {
-            className: 'ldr-textarea', value: edit,
-            onChange: function (ev) { onEdit(ev.target.value); },
-            placeholder: '输入修订后的摘要正文',
-          })),
+        // 版本正文在前：抽屉一打开就能读到摘要，而不是先看到空输入框
+        h('div', { className: 'ldr-label', style: { marginBottom: 8 } }, '摘要版本（' + vs.length + '）'),
+        items,
         selected
-          ? h('div', { className: 'ldr-dim' }, '将修订：seq ' + (selected.at ? timeText(selected.at) : '未知') + ' 那一版')
-          : h('div', { className: 'ldr-dim' }, '先在上方选择要修订的版本'),
-        h('div', { className: 'ldr-row' },
-          h('button', {
-            className: 'ldr-primary',
-            disabled: busy || !selected,
-            onClick: function () { onSubmit(selected); },
-          }, busy ? '提交中…' : '提交修订')),
-        h('div', { className: 'ldr-dim', style: { marginTop: 6 } },
-          '提交会写入本地摘要版本记录：追加一个新版本，不改动原摘要，也不改动任何会话日志。'
-          + '人工修订继承原摘要的来源范围，不代表逐句都有事件支持。'),
-        items);
+          ? h('div', { className: 'ldr-field', style: { marginTop: 14 } },
+              h('div', { className: 'ldr-label' }, '人工修订（追加新版本到本地状态，不覆盖原摘要）'),
+              h('div', { className: 'ldr-dim' }, '将修订：seq ' + (selected.at ? timeText(selected.at) : '未知') + ' 那一版'),
+              h('textarea', {
+                className: 'ldr-textarea', value: edit,
+                onChange: function (ev) { onEdit(ev.target.value); },
+                placeholder: '输入修订后的摘要正文',
+              }),
+              h('div', { className: 'ldr-row' },
+                h('button', {
+                  className: 'ldr-primary',
+                  disabled: busy,
+                  onClick: function () { onSubmit(selected); },
+                }, busy ? '提交中…' : '提交修订')),
+              h('div', { className: 'ldr-dim', style: { marginTop: 6 } },
+                '提交会写入本地摘要版本记录：追加一个新版本，不改动原摘要，也不改动任何会话日志。'
+                + '人工修订继承原摘要的来源范围，不代表逐句都有事件支持。'))
+          : h('div', { className: 'ldr-dim', style: { marginTop: 12 } },
+              '点任一版本下方的「以此版为基础修订」，才会在这里展开编辑框；提交只追加新版本，不覆盖原摘要。'));
     }
     // 采集范围（权限边界）：默认拒绝、排除优先；保存成功才生效
     function buildScopeSection(p) {
@@ -344,7 +418,7 @@ window.__ModuleLoader__.load({
                 const v = '' + r.verdict;
                 if (v.indexOf('allowed-by-') === 0) return h('span', { className: 'ldr-dim' }, '已允许');
                 if (v === 'denied-by-default') {
-                  return h('button', { className: 'ldr-toggle', onClick: function () { p.onInclude(r.id); } }, '纳入允许会话');
+                  return h('button', { className: 'ldr-toggle', disabled: p.saving, onClick: function () { p.onInclude(r.id); } }, '纳入允许会话');
                 }
                 // 排除优先：被排除目录或排除会话命中的项，加入 allowSessions 不会生效，
                 // 不能给一个点了也没用的按钮。
@@ -357,7 +431,8 @@ window.__ModuleLoader__.load({
               })()));
         });
         return h('div', { className: 'ldr-scroll', style: { marginTop: 12 } },
-          h('table', { className: 'ldr-table' }, th, h('tbody', null, trs)));
+          h('table', { className: 'ldr-table' }, th, h('tbody', null, trs)),
+          c.hasMore ? h('button', { className: 'ldr-toggle', disabled: p.saving || p.candLoading, onClick: p.onLoadMore }, p.candLoading ? '加载中…' : '加载更多会话（已显示 ' + c.rows.length + '）') : null);
       };
 
       return h('section', { className: 'ldr-sec' },
@@ -393,44 +468,296 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ldr-err' }, kids);
     }
 
+    function workText(value) {
+      if (value == null || value === '') return '未知';
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+      return JSON.stringify(value);
+    }
+
+    function workSources(value) {
+      if (!Array.isArray(value)) return '未知';
+      if (!value.length) return '没有可用的摘要来源';
+      return value.map(function (s) {
+        if (!s || typeof s !== 'object') return '来源未知';
+        return '会话 ' + workText(s.sessionId) + '，摘要 ' + workText(s.summaryId)
+          + '，事件区间 ' + workText(s.fromSeq) + '–' + workText(s.toSeq)
+          + (s.edited ? '（人工修订，区间继承自原摘要）' : '');
+      }).join('\n');
+    }
+    function workGaps(value) {
+      return Array.isArray(value) ? (value.length ? value.map(function (v) {
+        return typeof v === 'string' ? v : (v && (v.detail || v.code) ? String(v.detail || v.code) : '缺口详情未知');
+      }).join('\n') : '未记录缺口') : '未知';
+    }
+    function workItems(value) {
+      if (!Array.isArray(value)) return '未知';
+      if (!value.length) return '暂无记录';
+      return value.map(function (v) {
+        if (typeof v === 'string') return v;
+        if (!v || typeof v !== 'object') return '记录未知';
+        return [v.content || v.reason || v.detail || v.kind || '任务', v.status ? workStatus(v.status) : null].filter(Boolean).join(' · ');
+      }).join('\n');
+    }
+    function workStatus(value) {
+      return ({ proposed: '待确认', confirmed: '已确认，等待派发', running: '执行中',
+        succeeded: '执行完成', failed: '执行失败', unknown: '结果未知，不会自动重发',
+        timeout: '执行超时，结果未知，不会自动重发', cancelled: '已取消' })[value] || workText(value);
+    }
+    function workEvidence(source) {
+      if (typeof source !== 'string') return null;
+      try { const v = JSON.parse(source); return v && typeof v === 'object' ? v : null; } catch { return null; }
+    }
+    // 单次执行的约束口径：preset 后备只在「已生效」时才算第二层；未生效时如实说只有守卫。
+    function workConstraint(value) {
+      if (!value || typeof value !== 'object') return '未记录';
+      if (value.applied === true) {
+        return '守卫 + preset 后备「' + workText(value.preset) + '」（后备边界是整个父会话 cwd，不是单个任务目录）';
+      }
+      return '仅守卫约束（preset 后备未生效：' + workText(value.reason) + '）';
+    }
+    // preset 后备核对状态：三态分开，不能把「没核对」说成「已生效」。
+    function workExecFallback(value) {
+      if (!value || typeof value !== 'object') return '执行约束状态未接入';
+      if (!value.fallbackPreset) return '未配置 preset 后备：当前只有王朝守卫一层约束';
+      if (value.fallbackActive === true) {
+        return '已核对：preset「' + workText(value.fallbackPreset) + '」覆盖整个父会话 cwd（不是单个任务目录）';
+      }
+      if (value.fallbackReason === 'not-checked') return '尚未核对：首次派发前会核对执行根与父会话 cwd 的包含关系';
+      return '核对失败：' + workText(value.fallbackReason) + '；当前只有王朝守卫一层约束';
+    }
+
+    function WorkPanel() {
+      const [state, setState] = React.useState({ loading: true, data: null, error: null });
+      const [busy, setBusy] = React.useState(false);
+      const generation = React.useRef(0);
+      const confirming = React.useRef(false);
+      const lifetime = React.useRef(0);
+      const fail = function (message, life) {
+        if (life !== lifetime.current) return;
+        generation.current++;
+        setState({ loading: false, data: null, error: message });
+      };
+      const loadWork = React.useCallback(async function () {
+        if (confirming.current) return;
+        const mine = ++generation.current;
+        const life = lifetime.current;
+        const ctrl = new AbortController();
+        const timer = setTimeout(function () { ctrl.abort(); }, 12000);
+        try {
+          const r = await fetch('/api/dsh-wangchao/work', { signal: ctrl.signal, cache: 'no-store' });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const j = await r.json();
+          if (!j || j.ok !== true || !Array.isArray(j.plans) || !Array.isArray(j.tasks)) {
+            throw new Error((j && (j.error || j.message)) || '响应不完整');
+          }
+          if (mine === generation.current) setState({ loading: false, data: j, error: null });
+        } catch (e) {
+          // 即使是较早的请求失败，也不能继续展示可能已撤权的内容。
+          fail('读取失败：' + String(e && e.message || e), life);
+        } finally { clearTimeout(timer); }
+      }, []);
+      React.useEffect(function () {
+        lifetime.current++;
+        loadWork();
+        const timer = setInterval(loadWork, 15000);
+        const visible = function () { if (document.visibilityState === 'visible') loadWork(); };
+        document.addEventListener('visibilitychange', visible);
+        return function () { lifetime.current++; generation.current++; clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
+      }, [loadWork]);
+      const confirmPlan = async function (id) {
+        if (confirming.current) return;
+        confirming.current = true;
+        const mine = ++generation.current;
+        const life = lifetime.current;
+        setBusy(true);
+        const ctrl = new AbortController();
+        const timer = setTimeout(function () { ctrl.abort(); }, 12000);
+        try {
+          const r = await fetch('/api/dsh-wangchao/work', {
+            method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctrl.signal,
+            body: JSON.stringify({ action: 'confirm', planId: id }),
+          });
+          const j = await r.json();
+          if (!r.ok || !j || j.ok !== true) throw new Error((j && (j.error || j.message)) || 'HTTP ' + r.status);
+          if (mine === generation.current) {
+            confirming.current = false;
+            setState({ loading: true, data: null, error: null });
+            loadWork();
+          }
+        } catch (e) {
+          fail('确认请求失败，派发结果可能未知，请先刷新核对：' + String(e && e.message || e), life);
+        } finally { clearTimeout(timer); confirming.current = false; setBusy(false); }
+      };
+      const cancelTask = async function (id) {
+        if (busy) return;
+        setBusy(true);
+        const mine = ++generation.current;
+        const life = lifetime.current;
+        const ctrl = new AbortController();
+        const timer = setTimeout(function () { ctrl.abort(); }, 12000);
+        try {
+          const r = await fetch('/api/dsh-wangchao/work', {
+            method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctrl.signal,
+            body: JSON.stringify({ action: 'cancel', taskId: id }),
+          });
+          const j = await r.json();
+          if (!r.ok || !j || j.ok !== true) throw new Error((j && (j.error || j.message)) || 'HTTP ' + r.status);
+          if (mine === generation.current) { setState({ loading: true, data: null, error: null }); loadWork(); }
+        } catch (e) {
+          fail('取消请求失败，请刷新核对状态：' + String(e && e.message || e), life);
+        } finally { clearTimeout(timer); setBusy(false); }
+      };
+      const row = function (label, value) {
+        return h('div', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, label + '：' + workText(value));
+      };
+      const d = state.data;
+      return h('section', { className: 'ldr-sec' },
+        h('div', { className: 'ldr-h' }, '计划与任务'),
+        h('div', { className: 'ldr-note' }, '计划由首辅后端提供；确认后才会派发。来源或缺口未提供时显示未知。'),
+        state.error ? h('div', { className: 'ldr-err', role: 'alert' }, state.error, h('button', { className: 'ldr-btn', onClick: loadWork }, '刷新核对')) : null,
+        state.loading ? h('div', { className: 'ldr-empty' }, '读取中…') : null,
+        d ? h('div', null,
+          typeof d.withheldCount === 'number' && d.withheldCount > 0
+            ? h('div', { className: 'ldr-warn' }, '有 ' + d.withheldCount + ' 条记录未显示，可能因授权不可确认、已撤销或读取期间状态变化；记录仍占用任务容量。') : null,
+          h('div', { className: 'ldr-label' }, '交接'),
+          !Object.prototype.hasOwnProperty.call(d, 'handoff') ? h('div', { className: 'ldr-dim' }, '交接尚未接入。')
+            : (d.handoff?.unavailable ? h('div', { className: 'ldr-err' }, '交接不可用：' + workText(d.handoff.error))
+            : (!d.handoff || d.handoff.exists === false ? h('div', { className: 'ldr-dim' }, '暂无交接记录，不能据此判断没有问题。')
+            : h('div', { className: 'ldr-field' },
+                row('交接编号', d.handoff.id), row('生成时间', typeof d.handoff.generatedAt === 'number' ? timeText(d.handoff.generatedAt) : null),
+                row('信息缺口', workGaps(d.handoff.gaps)), row('待办', workItems(d.handoff.todos)),
+                row('未解决结果', workItems(d.handoff.unknowns)),
+                h('div', { className: 'ldr-dim' }, '摘要是待核实信息，不自动视为已确认事实。')))),
+          h('div', { className: 'ldr-label', style: { marginTop: 14 } }, '预算与监督'),
+          !d.budget ? h('div', { className: 'ldr-dim' }, '预算与监督未接入或不可用')
+            : h('div', { className: 'ldr-field' },
+                row('本地估算额度', d.budget.limitUsd), row('本地累计估算', d.budget.usedEstimateUsd),
+                row('费用未知记录', d.budget.unknownCount), row('暂停原因', d.budget.pauseReason),
+                h('div', { className: 'ldr-dim' }, '本地估算，不是服务商账单硬上限。')),
+          h('div', { className: 'ldr-label', style: { marginTop: 14 } }, '执行约束'),
+          d.exec ? h('div', { className: 'ldr-field' },
+            row('守卫', (d.exec.guardInstalled === true ? '已安装' : '未安装') + ' · 作用域 ' + workText(d.exec.guardScope)),
+            row('preset 后备', workExecFallback(d.exec)),
+            typeof d.exec.fallbackGuardOnlyCount === 'number' && d.exec.fallbackGuardOnlyCount > 0
+              ? h('div', { className: 'ldr-warn' }, '有 ' + d.exec.fallbackGuardOnlyCount + ' 次执行在 preset 后备未生效时完成（仅守卫约束），最近一次原因：'
+                + workText(d.exec.fallbackLastFailure && d.exec.fallbackLastFailure.reason)
+                + '。这些结果按实际审计判定，不因后备未生效而判为未知。')
+              : null,
+            d.exec.fallbackRequired === true
+              ? h('div', { className: 'ldr-dim' }, '已配置为要求后备必须生效（execRequireFallbackPreset）：后备设置失败会拒绝执行并判为结果未知。') : null,
+            h('div', { className: 'ldr-dim' }, workText(d.exec.note)))
+            : h('div', { className: 'ldr-dim' }, '执行约束状态未接入。'),
+          h('div', { className: 'ldr-label', style: { marginTop: 14 } }, '计划'),
+          d.plans.length ? d.plans.map(function (p, i) {
+            if (!p || typeof p !== 'object') return null;
+            return h('div', { key: p.id || i, className: 'ldr-field', style: { borderTop: '1px solid var(--ldr-soft)', paddingTop: 8 } },
+              row('计划', p.content), row('计划 ID', p.id), row('会话', p.sessionId), row('来源', workSources(p.sources)), row('信息缺口', workGaps(p.gaps)),
+              row('状态', workStatus(p.status)), row('创建时间', typeof p.createdAt === 'number' ? timeText(p.createdAt) : p.createdAt),
+              h('button', { className: 'ldr-primary', disabled: busy || typeof p.id !== 'string' || !p.id,
+                onClick: function () { confirmPlan(p.id); } }, busy ? '处理中…' : '确认并派发'));
+          }) : h('div', { className: 'ldr-dim' }, '暂无计划'),
+          h('div', { className: 'ldr-label', style: { marginTop: 14 } }, '任务'),
+          d.tasks.length ? d.tasks.map(function (t, i) {
+            if (!t || typeof t !== 'object') return null;
+            const evidence = workEvidence(t.source);
+            const confirmation = t.confirmation && typeof t.confirmation === 'object'
+              ? workText(t.confirmation.by) + ' · ' + (typeof t.confirmation.at === 'number' ? timeText(t.confirmation.at) : '时间未知') : '未知';
+            return h('div', { key: t.id || i, className: 'ldr-field', style: { borderTop: '1px solid var(--ldr-soft)', paddingTop: 8 } },
+              row('任务', t.content), row('任务 ID', t.id), row('计划 ID', t.planId), row('会话', t.sessionId),
+              row('来源', workSources(evidence && evidence.sources)), row('信息缺口', workGaps(evidence && evidence.gaps)),
+              row('执行者', t.assignee), row('状态', workStatus(t.status)), row('确认', confirmation),
+              t.constraint ? row('执行约束', workConstraint(t.constraint)) : null,
+              row('依赖任务', Array.isArray(t.dependsOn) && t.dependsOn.length ? t.dependsOn.join('、') : '无'),
+              t.cancellation ? row('取消', workText(t.cancellation.by) + ' · ' + timeText(t.cancellation.at)
+                + (t.stop && t.stop.confirmed === false ? '（已请求取消，执行是否停止未确认）' : '')) : null,
+              row('结果', t.result == null && t.status === 'succeeded' ? '无文本输出' : t.result),
+              t.failureReason ? row('失败原因', t.failureReason) : null,
+              row('创建时间', typeof t.createdAt === 'number' ? timeText(t.createdAt) : t.createdAt),
+              (t.status === 'confirmed' || t.status === 'running') ? h('button', { className: 'ldr-btn', disabled: busy,
+                onClick: function () { cancelTask(t.id); } }, busy ? '处理中…' : '取消') : null);
+          }) : h('div', { className: 'ldr-dim' }, '暂无任务')) : null);
+    }
+
     // 召见后需要客户端服务切到原生会话界面；apply 时填入
     let clientCtx = null;
 
-    // 首辅被宿主拒绝发送时，把原因写进该会话的输入框（composer block），避免「发了没反应」。
-    // 强制在宿主侧（agent/pre-step reject）；这里只是可见提示：
-    // 拿不到 sessions/conversation 服务时返回 false，面板横幅仍显示原因，不静默。
-    // 记录本插件设置过 block 的会话，卸载时必须清掉：blocks.forget 在全仓没有调用方，
-    // 不手动清会让输入框在插件重载后永久变灰。
-    let chiefBlockApplied = null;
-    const applyChiefComposerBlock = function (chief) {
+    // 本插件设置过的 composer block：sid -> reason。
+    // 卸载/重载时必须逐个清掉：blocks.forget 在全仓没有调用方，没人会替我们清，
+    // 否则输入框会永久变灰。
+    const blockApplied = new Map();
+    const blocksOf = function (sid) {
       try {
-        const sid = chief && chief.exists && chief.sessionId ? String(chief.sessionId) : null;
-        const reason = chief && chief.blockedReason ? String(chief.blockedReason) : null;
-        const ctx = clientCtx;
-        const sessions = ctx && typeof ctx.get === 'function' ? ctx.get('sessions') : null;
-        if (!sessions || typeof sessions.scope !== 'function' || !sid) return false;
+        const sessions = clientCtx && typeof clientCtx.get === 'function' ? clientCtx.get('sessions') : null;
+        if (!sessions || typeof sessions.scope !== 'function' || typeof sid !== 'string' || !sid) return null;
         const scoped = sessions.scope(sid);
         const conv = scoped && typeof scoped.get === 'function' ? scoped.get('conversation') : null;
-        const blocks = conv && conv.blocks ? conv.blocks : null;
-        if (!blocks || typeof blocks.set !== 'function') return false;
-        blocks.set(sid, reason ? { reason: reason } : undefined);
-        chiefBlockApplied = reason ? sid : (chiefBlockApplied === sid ? null : chiefBlockApplied);
+        return conv && conv.blocks && typeof conv.blocks.set === 'function' ? conv.blocks : null;
+      } catch (e) { return null; }
+    };
+    const writeComposerBlock = function (sid, reason) {
+      const blocks = blocksOf(sid);
+      if (!blocks) return false;
+      try {
+        blocks.set(sid, reason ? { reason: String(reason) } : undefined);
+        if (reason) blockApplied.set(sid, String(reason));
+        else blockApplied.delete(sid);
         return true;
-      } catch (e) {
-        return false;
+      } catch (e) { return false; }
+    };
+    // 服务端阻断映射 → Map<sessionId, reason>。
+    // 返回 null = 无法确认（字段缺失 / 状态不可读 / 请求失败），调用方必须保留旧提示、不清空。
+    const blockedMapOf = function (payload) {
+      if (!payload || typeof payload !== 'object') return null;
+      if (payload.blockedSessionsStatus && payload.blockedSessionsStatus !== 'ok') return null;
+      if (!Array.isArray(payload.blockedSessions)) return null;
+      const map = new Map();
+      for (const x of payload.blockedSessions) {
+        if (!x || typeof x.sessionId !== 'string' || !x.sessionId) continue;
+        map.set(x.sessionId, String(x.reason || '该首辅会话已被阻断，无法发送。'));
       }
+      return map;
+    };
+    // 把某个会话的输入框提示对齐到服务端判定（与宿主 agent/pre-step 的 chiefBlockOf 同源）：
+    // 只有「已登记首辅 + 当前被阻断」才设提示；曾经设过而现在不再被阻断才清掉。
+    // 这里只是可见提示，强制仍在宿主侧 reject —— 不放行任何原本会被拒绝的发送。
+    const syncComposerBlock = function (sid, map) {
+      if (typeof sid !== 'string' || !sid || !(map instanceof Map)) return 'unknown';
+      const reason = map.get(sid) || null;
+      if (reason) return writeComposerBlock(sid, reason) ? 'set' : 'failed';
+      if (blockApplied.has(sid)) return writeComposerBlock(sid, null) ? 'cleared' : 'failed';
+      return 'unchanged';
+    };
+    // 当前主视图里显示的会话 id（与常驻同步同一判断：retainedBy.mainView）
+    const activeSessionIdOf = function (sessions) {
+      try {
+        const snap = sessions.list.getSnapshot();
+        const byId = (snap && snap.byId) || {};
+        const active = Object.keys(byId).map(function (k) { return byId[k]; }).find(function (r) {
+          return r && r.retainedBy && (r.retainedBy.mainView || 0) > 0;
+        });
+        return active && typeof active.id === 'string' ? active.id : null;
+      } catch (e) { return null; }
     };
     function View() {
       const [st, setSt] = React.useState({ loading: true, error: null, failedAt: null, ov: null, ss: null });
-      const [chatOpen, setChatOpen] = React.useState(false);
+      // 抽屉：null | 'session' | 'chief' | 'scope'。同一时刻最多一个。
+      const [drawer, setDrawer] = React.useState(null);
+      // 独立窗口：DSH 桌面主窗口禁止应用内开窗，改由 host 拉起 Edge/Chrome --app 无边框窗口。
+      // 预取地址用于确认能力可用；点击时调用 POST /open-standalone 由 host 启动。
+      const [standaloneUrl, setStandaloneUrl] = React.useState(null);
+      const [standaloneErr, setStandaloneErr] = React.useState(null);
+      // 左栏任务卡：null = 尚未读取；unavailable = 读不到（不能显示成 0 条计划）
+      const [workSummary, setWorkSummary] = React.useState(null);
       // 双视图：项目 / 对话共用同一份过滤结果；采集范围是权限边界，单独一栏
-      const [view, setView] = React.useState('projects');
+      const [view, setView] = React.useState('overview');
       const [projectFilter, setProjectFilter] = React.useState('');
       const [rulesState, setRulesState] = React.useState(null);
       const [rulesErr, setRulesErr] = React.useState(null);
       const [rulesDraft, setRulesDraft] = React.useState({ allowCwds: '', excludeCwds: '', allowSessions: '', excludeSessions: '' });
       const [saving, setSaving] = React.useState(false);
+      const savingRef = React.useRef(false);
       const [cand, setCand] = React.useState(null);
+      const [candLoading, setCandLoading] = React.useState(false);
   // 摘要版本面板：{ sessionId, loading, data, error }
   const [sumPanel, setSumPanel] = React.useState(null);
   const [sumEdit, setSumEdit] = React.useState('');
@@ -627,7 +954,7 @@ window.__ModuleLoader__.load({
     }
   }, [sumEdit, sumBusy, openSummary]);
 
-  const load = React.useCallback(function () {
+  const load = React.useCallback(function (skipRules) {
         const my = ++genRef.current;
         // 每个请求单独结算状态，不用 Promise.all + 首错字符串判断：
         // 两个请求分别返回 500 和 401 时，谁先 reject 不确定，可能导致
@@ -725,7 +1052,7 @@ window.__ModuleLoader__.load({
         one('/api/dsh-wangchao/sessions').then(function (r) { handle('sessions', r); });
 
         // 规则单独拉取：失败只影响「采集范围」栏，不拖垮主面板
-        fetch('/api/dsh-wangchao/rules').then(function (r) {
+        if (skipRules !== true) fetch('/api/dsh-wangchao/rules').then(function (r) {
           return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status));
         }).then(function (j) {
           if (my !== genRef.current) return;
@@ -737,7 +1064,9 @@ window.__ModuleLoader__.load({
         });
       }, []);
 
-      const postRules = function (body) {
+      const postRules = function (body, includedId) {
+        if (savingRef.current) return Promise.resolve(false);
+        savingRef.current = true;
         setSaving(true);
         setRulesErr(null);
         // 带上「本次保存基于哪个修订号」：服务端据此拒绝多窗口互相覆盖
@@ -752,13 +1081,12 @@ window.__ModuleLoader__.load({
             function () { return { status: r.status, json: null }; });
         }).then(function (res) {
           if (!res.json || res.json.ok !== true) {
-            setSaving(false);
             const conflict = res.status === 409 || (res.json && res.json.conflict === true);
             if (conflict) {
               // 冲突时只刷新「服务端当前值」用于展示，不动用户草稿：
               // 用户正在编辑的内容必须能复制或继续改，不能因为其他窗口保存就被静默覆盖。
               setRulesErr('规则已被其他窗口修改（服务端修订号 ' + (res.json && res.json.revision) +
-                '）。你的修改仍保留在编辑框里，可先复制，再点「重新读取」后重新提交。');
+                '）。你的修改仍保留在编辑框里，可先复制，再点右上角「刷新」后重新提交。');
               return fetch('/api/dsh-wangchao/rules').then(function (r) { return r.ok ? r.json() : null; })
                 .then(function (j) {
                   if (!j) return;
@@ -772,20 +1100,31 @@ window.__ModuleLoader__.load({
               .then(function (j) { if (j) { setRulesState(j); setRulesDraft(draftOf(j)); } })
               .catch(function () {});
           }
-          setSaving(false);
-          setRulesState({
+          setRulesState(function (prev) { return Object.assign({}, prev, {
             rules: res.json.rules, source: res.json.source, updatedAt: Date.now(),
-            revision: typeof res.json.revision === 'number' ? res.json.revision : (rulesState && rulesState.revision),
-          });
-          setRulesDraft(draftOf({ rules: res.json.rules }));
-          setCand(null);
+            revision: typeof res.json.revision === 'number' ? res.json.revision : (prev && prev.revision),
+          }); });
+          const savedDraft = draftOf({ rules: res.json.rules });
+          if (includedId) {
+            setRulesDraft(function (prev) { return Object.assign({}, prev, { allowSessions: savedDraft.allowSessions }); });
+            setCand(function (prev) {
+              return prev ? Object.assign({}, prev, { rows: prev.rows.map(function (row) {
+                return row.id === includedId ? Object.assign({}, row, { verdict: 'allowed-by-session' }) : row;
+              }) }) : prev;
+            });
+          } else {
+            setRulesDraft(savedDraft);
+            if (cand) loadCandidates();
+          }
           // 规则变化可能让已打开的摘要面板对应会话被撤权：重新拉一次判权结果
           refreshSummaryPanel();
-          load();
+          load(true);
           return true;
         }).catch(function (e) {
-          setSaving(false);
           setRulesErr('规则未保存：' + (e && e.message ? e.message : e));
+        }).finally(function () {
+          savingRef.current = false;
+          setSaving(false);
         });
       };
 
@@ -800,8 +1139,115 @@ window.__ModuleLoader__.load({
 
       const resetToConfig = function () { postRules({ reset: true }); };
 
+      // 导航失败时上报一次「无正文」元数据，供复盘。字段只有服务形态与计数，不含正文/凭据。
+      const sendNavDiag = function (payload) {
+        try {
+          fetch('/api/dsh-wangchao/nav-diag', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ at: Date.now(), ...payload }),
+          }).catch(function () {});
+        } catch {}
+      };
+      const navSnapshot = function (sessions, workspaces, ws, layout, sid) {
+        const read = function (fn) { try { return fn(); } catch (e) { return { error: String((e && e.message) || e).slice(0, 160) }; } };
+        return read(function () {
+          const list = sessions.list.getSnapshot();
+          const row = list.byId[sid];
+          const wsp = workspaces && workspaces.list ? workspaces.list.getSnapshot() : {};
+          const archived = Array.isArray(wsp.archivedSessionIds) ? wsp.archivedSessionIds : [];
+          const sel = ws && ws.selection && typeof ws.selection.getSnapshot === 'function' ? ws.selection.getSnapshot() : null;
+          return {
+            retainInfo: sessions.retainInfo(sid).getSnapshot(),
+            rowRetainedBy: row && row.retainedBy ? row.retainedBy : null,
+            selection: sel,
+            phase: list.phase,
+            archivedCount: archived.length,
+            chiefArchived: archived.includes(sid),
+            selectedArchived: sel && sel.sessionId ? archived.includes(sel.sessionId) : null,
+            selectedId: sel && sel.sessionId ? sel.sessionId : null,
+            activePanelId: layout && layout.panelInfo && typeof layout.panelInfo.getSnapshot === 'function' ? layout.panelInfo.getSnapshot().activePanelId : null,
+          };
+        });
+      };
+      // 先等待会话及其工作区归属进入客户端目录，再确认该会话能打开，避免跳到空白新会话。
+      const openChiefTarget = async function (sid, wa) {
+        const sessions = clientCtx?.get?.('sessions');
+        const workspaces = clientCtx?.get?.('workspaces');
+        const ws = clientCtx?.get?.('uiWorkspace');
+        const layout = clientCtx?.get?.('layout');
+        const diag = { sid, waOk: !!(wa && wa.ok), waWorkspaceId: wa && wa.workspaceId ? wa.workspaceId : null };
+        try {
+          if (!sid || !sessions?.refresh || !sessions?.retain || !workspaces?.list || !ws?.openSession || !layout?.beginNavigation) {
+            diag.stage = 'services';
+            diag.services = { sessions: !!sessions, refresh: !!(sessions && sessions.refresh), retain: !!(sessions && sessions.retain), workspaces: !!(workspaces && workspaces.list), openSession: !!(ws && ws.openSession), beginNavigation: !!(layout && layout.beginNavigation) };
+            throw new Error('会话或工作区服务不可用');
+          }
+          if (!wa?.ok || !wa.workspaceId) { diag.stage = 'attach'; throw new Error('首辅尚未归入工作区，请先检查首辅工作区状态'); }
+          const navigation = layout.beginNavigation();
+          const signal = AbortSignal.any([navigation, AbortSignal.timeout(8000)]);
+          await Promise.race([
+            sessions.refresh(),
+            new Promise((_, reject) => {
+              if (signal.aborted) reject(signal.reason);
+              else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+            }),
+          ]).catch(e => { if (!navigation.aborted) throw e; });
+          for (let i = 0; i < 40; i++) {
+            if (navigation.aborted) { diag.stage = 'cancelled'; return false; }
+            const snapshot = workspaces.list.getSnapshot();
+            if (snapshot.items?.some(w => w.workspaceId === wa.workspaceId && w.sessionIds?.includes(sid))) break;
+            if (i === 39) { diag.stage = 'workspace-wait'; diag.items = (snapshot.items || []).map(w => ({ id: w.workspaceId, has: Array.isArray(w.sessionIds) && w.sessionIds.includes(sid) })); throw new Error('首辅工作区状态尚未同步，请稍后点击“打开首辅会话”重试'); }
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          // 首辅若在归档集合里，openSession 会被界面「归档会话清理」清空选中并切回空白页，
+          // 表现就是一直停在“选择一个工作区开始”。先取消归档再打开。
+          if (Array.isArray(workspaces.list.getSnapshot().archivedSessionIds)
+            && workspaces.list.getSnapshot().archivedSessionIds.includes(sid)) {
+            if (typeof workspaces.unarchiveSession !== 'function') {
+              diag.stage = 'unarchive-missing';
+              throw new Error('首辅在归档列表中，但当前界面没有取消归档接口');
+            }
+            await workspaces.unarchiveSession(sid);
+            let unarchived = false;
+            for (let i = 0; i < 40; i++) {
+              if (navigation.aborted) { diag.stage = 'cancelled'; return false; }
+              const snap = workspaces.list.getSnapshot();
+              if (!Array.isArray(snap.archivedSessionIds) || !snap.archivedSessionIds.includes(sid)) { unarchived = true; break; }
+              await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            if (!unarchived) { diag.stage = 'unarchive-wait'; throw new Error('已请求取消归档首辅，但界面状态未同步，请稍后重试'); }
+          }
+          const reference = sessions.retain(sid, { source: 'controllerOperation', signal });
+          try {
+            const binding = await reference.ready;
+            if (navigation.aborted) { diag.stage = 'cancelled'; return false; }
+            const snapshot = binding.session.getSnapshot();
+            if (snapshot.openState !== 'open') { diag.stage = 'open'; diag.openState = snapshot.openState; throw new Error('首辅会话未能打开：' + String(snapshot.openError?.message ?? snapshot.openState)); }
+            diag.before = navSnapshot(sessions, workspaces, ws, layout, sid);
+            ws.openSession(sid);
+            diag.afterSync = navSnapshot(sessions, workspaces, ws, layout, sid);
+            const retained = diag.afterSync && diag.afterSync.retainInfo && diag.afterSync.retainInfo.retainedBy;
+            if (!(retained && retained.mainView > 0)) {
+              diag.stage = 'mainview-missing';
+              try { layout.selectPanel && layout.selectPanel('leader'); } catch {}
+              throw new Error('未能确认首辅会话已选中（保留计数：' + JSON.stringify(retained ?? null) + '）');
+            }
+            diag.stage = 'done';
+            return true;
+          } finally { reference.release(); }
+        } catch (e) {
+          diag.stage = diag.stage || 'exception';
+          diag.error = String((e && e.message) || e).slice(0, 300);
+          sendNavDiag(diag);
+          throw e;
+        }
+      };
+
       // 召见首辅：host 建立/恢复会话并安装只读守卫；成功后切到 DSH 原生会话界面。
       // 守卫未通过时 host 返回 ok:false，界面不提供输入入口。
+      // host 侧还会尝试把会话归入 cwd 对应的 workspace（workspaceRegistry.attachSession），
+      // 归组失败时如实显示原因：会话仍能打开，只是侧栏按工作区分组里看不到它。
       const summonChief = function () {
         setChiefBusy(true);
         setChiefMsg(null);
@@ -809,18 +1255,16 @@ window.__ModuleLoader__.load({
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ action: 'summon' }),
-        }).then(function (r) { return r.json(); }).then(function (j) {
+        }).then(function (r) { return r.json(); }).then(async function (j) {
           if (!j || j.ok !== true) {
             setChiefMsg((j && (j.error || j.warning)) || '召见失败');
             return;
           }
           const sid = j.chief && j.chief.sessionId;
-          const ws = clientCtx && clientCtx.get ? clientCtx.get('uiWorkspace') : null;
-          if (ws && typeof ws.openSession === 'function' && sid) {
-            ws.openSession(sid);
-            setChiefMsg(null);
-          } else {
-            setChiefMsg('会话已建立，但无法自动打开会话界面；会话 id：' + sid);
+          try {
+            await openChiefTarget(sid, j.chief?.workspaceAttach);
+          } catch (e) {
+            setChiefMsg('首辅已召见，但尚未打开：' + String(e?.message || e) + '。请留在御书房稍后重试，不要选择工作区新建会话。');
           }
           if (typeof load === 'function') load();
         }).catch(function (e) {
@@ -828,12 +1272,32 @@ window.__ModuleLoader__.load({
         }).then(function () { setChiefBusy(false); });
       };
 
-      const loadCandidates = function () {
+      // 手动重试使用同一条校验路径，不创建普通新会话。
+      const openChiefSession = async function () {
+        const chief = st.ov?.chief;
+        const sid = chief?.sessionId;
+        if (!sid) { setChiefMsg('没有可打开的首辅会话：请先召见首辅。'); return; }
+        setChiefBusy(true);
+        setChiefMsg(null);
+        try { await openChiefTarget(sid, chief.workspaceAttach); }
+        catch (e) { setChiefMsg('未能打开首辅会话：' + String(e?.message || e) + '。请留在御书房重试，不要选择工作区新建会话。'); }
+        finally { setChiefBusy(false); }
+      };
+
+      const loadCandidates = function (append) {
+        if (candLoading) return;
+        const after = append === true && cand && cand.rows.length ? cand.rows[cand.rows.length - 1].id : '';
+        setCandLoading(true);
         setRulesErr(null);
-        fetch('/api/dsh-wangchao/candidates').then(function (r) {
+        fetch('/api/dsh-wangchao/candidates?after=' + encodeURIComponent(after)).then(function (r) {
           return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status));
         }).then(function (j) {
-          setCand(j);
+          setCand(function (prev) {
+            if (append !== true) return j;
+            if (!prev || !prev.rows.length || prev.rows[prev.rows.length - 1].id !== after) return prev;
+            const seen = new Set(prev.rows.map(function (row) { return row.id; }));
+            return Object.assign({}, j, { rows: prev.rows.concat(j.rows.filter(function (row) { return !seen.has(row.id); })) });
+          });
           // 标题异步补：列表先出来，再对前 6 条取标题（readTitleSnapshot 单条约 600ms，条数多了会拖很久）。
           // readTitleSnapshot 单条约 200ms，不能放在列表请求里等，否则打开候选要卡好几秒。
           const ids = (j.rows || []).slice(0, 6).map(function (r) { return r.id; });
@@ -854,26 +1318,98 @@ window.__ModuleLoader__.load({
             })
             .catch(function () { /* 标题拿不到就显示 id */ });
         })
-          .catch(function (e) { setRulesErr('候选读取失败：' + (e && e.message ? e.message : e)); });
+          .catch(function (e) { setRulesErr('候选读取失败：' + (e && e.message ? e.message : e)); })
+          .finally(function () { setCandLoading(false); });
       };
 
       const includeSession = function (id) {
+        if (savingRef.current) return;
         const cur = linesOf(rulesDraft.allowSessions);
         if (cur.indexOf(id) >= 0) return;
         const next = cur.concat([id]);
         setRulesDraft(Object.assign({}, rulesDraft, { allowSessions: next.join('\n') }));
         // 只提交这一个字段：不把界面上尚未保存的其他编辑一并提交
-        postRules({ allowSessions: next });
+        postRules({ allowSessions: next }, id);
       };
 
       React.useEffect(function () { load(); }, [load]);
 
-      // 首辅被拒绝发送时同步输入框提示（composer block）。
-      // 每次 overview 刷新对齐一次；reason 相同时注册表内部会去重。
+      // 独立窗口地址只在 DSH 宿主里需要；独立页面自身不显示入口。
       React.useEffect(function () {
-        const chiefInfo = st.ov && st.ov.chief ? st.ov.chief : null;
-        applyChiefComposerBlock(chiefInfo);
+        if (window.__wcStandalone === true) return;
+        let alive = true;
+        fetch('/api/dsh-wangchao/standalone-url')
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (j) {
+            if (alive && j && j.ok === true && typeof j.url === 'string') setStandaloneUrl(j.url);
+          })
+          .catch(function () {});
+        return function () { alive = false; };
+      }, []);
+
+      // 面板打开时也给「当前首辅会话」对齐输入框提示：来源是 overview 的 blockedSessions
+      // （服务端与 GET /chief、宿主 pre-step 同源）。字段缺失/状态不可读时保持现状。
+      React.useEffect(function () {
+        const ovNow = st.ov;
+        if (!ovNow) return;
+        const chiefNow = ovNow.chief;
+        if (!chiefNow || !chiefNow.exists || !chiefNow.sessionId) return;
+        const map = blockedMapOf(ovNow);
+        if (!map) return;
+        syncComposerBlock(String(chiefNow.sessionId), map);
       }, [st.ov]);
+
+      // 任务卡摘要：只读计数，供左栏卡片与页签角标。读不到如实显示，不冒充 0。
+      // mini-react 不执行 useEffect 的清理函数，定时器用 ref 去重，避免每次渲染叠一个。
+      const workTimerRef = React.useRef(null);
+      const loadWorkSummary = React.useCallback(function () {
+        fetch('/api/dsh-wangchao/work', { cache: 'no-store' })
+          .then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          })
+          .then(function (j) {
+            if (!j || j.ok !== true) throw new Error((j && j.error) || '响应不完整');
+            setWorkSummary({
+              unavailable: false,
+              plans: Array.isArray(j.plans) ? j.plans.length : 0,
+              tasks: Array.isArray(j.tasks) ? j.tasks.length : 0,
+              running: typeof j.runningCount === 'number' ? j.runningCount : null,
+              withheld: typeof j.withheldCount === 'number' ? j.withheldCount : 0,
+              budget: j.budget || null,
+              paused: j.schedulerPaused || null,
+            });
+          })
+          .catch(function (e) {
+            setWorkSummary({ unavailable: true, error: String((e && e.message) || e) });
+          });
+      }, []);
+      React.useEffect(function () {
+        if (workTimerRef.current != null) { clearInterval(workTimerRef.current); workTimerRef.current = null; }
+        if (view === 'work') return;          // 任务页签自己按 15s 拉，避免重复请求
+        loadWorkSummary();
+        workTimerRef.current = setInterval(loadWorkSummary, 20000);
+      }, [view, loadWorkSummary]);
+
+      // Esc 收起抽屉。同样用 ref 记住上一个监听器：mini-react 不跑 cleanup，
+      // 每次渲染先摘旧的再挂新的；真实 React 下再返回 cleanup 兜底。
+      const escRef = React.useRef(null);
+      React.useEffect(function () {
+        if (escRef.current) {
+          try { document.removeEventListener('keydown', escRef.current); } catch (e) {}
+          escRef.current = null;
+        }
+        if (!drawer) return;
+        const onKey = function (ev) {
+          if (ev && (ev.key === 'Escape' || ev.keyCode === 27)) closeDrawer();
+        };
+        escRef.current = onKey;
+        try { document.addEventListener('keydown', onKey); } catch (e) {}
+        return function () {
+          try { document.removeEventListener('keydown', onKey); } catch (e) {}
+          if (escRef.current === onKey) escRef.current = null;
+        };
+      }, [drawer]);
 
       if (st.loading) {
         return h('div', { className: 'ldr-wrap' }, h('div', { className: 'ldr-empty' }, '正在读取…'));
@@ -886,10 +1422,6 @@ window.__ModuleLoader__.load({
 
       const ov = st.ov;
       const rows = (st.ss && st.ss.sessions) || [];
-      const foot = h('div', { className: 'ldr-foot' },
-        '王朝 · 索引生成于 ' + timeText(ov.generatedAt) + ' · 轮询 ' + ov.pollCount + ' 次' + (ov.stalePending ? ' · 上次未正常收尾' : ''));
-      const chat = h('div', { className: 'ldr-chat' }, '内阁首辅：尚未接入');
-
       const rejected = ov.rejectedStats || {};
       const hiddenCount = (rejected['no-live-metadata'] || 0) + (rejected['not-permitted'] || 0);
       const hiddenNote = hiddenCount > 0
@@ -902,23 +1434,26 @@ window.__ModuleLoader__.load({
       const advices = Array.isArray(ov.advices) ? ov.advices : [];
       const terms = Array.isArray(ov.terms) ? ov.terms : [];
 
-      const chatPanel = h('div', { className: chatOpen ? 'ldr-chatpanel open' : 'ldr-chatpanel' },
-        h('div', { className: 'ldr-chathead' },
-          h('span', null, '内阁首辅'),
-          h('button', {
-            className: 'ldr-toggle',
-            disabled: chiefBusy || ov.observeOnly === true,
-            onClick: function () { if (ov.observeOnly !== true) summonChief(); },
-          }, ov.observeOnly === true
-            ? '观察版未启用首辅'
-            : (chiefBusy ? '召见中…' : (chief.exists && chief.open ? '打开首辅' : '召见首辅'))),
-          h('button', { className: 'ldr-toggle', onClick: function () { setChatOpen(false); } }, '收起')),
-        h('div', { className: 'ldr-chatbody' },
+      // 首辅：内容原样搬进抽屉（常驻 320px 侧栏塞 13 段文字读不动）。
+      // 抽屉只在打开时求值，未打开不构造这串节点。
+      const chiefSection = function () {
+        return h('div', null,
+          h('div', { className: 'ldr-row', style: { marginBottom: 12 } },
+            h('button', {
+              className: 'ldr-primary',
+              disabled: chiefBusy || ov.observeOnly === true,
+              onClick: function () { if (ov.observeOnly !== true) summonChief(); },
+            }, ov.observeOnly === true
+              ? '观察版未启用首辅'
+              : (chiefBusy ? '召见中…' : (chief.exists && chief.open ? '打开首辅' : '召见首辅')))),
           chiefMsg ? h('div', { className: 'ldr-err', style: { marginBottom: 10 } }, chiefMsg) : null,
           chief.blockedReason
-            ? h('div', { className: 'ldr-warn', style: { borderLeft: '3px solid #b4453a', paddingLeft: 8, marginBottom: 10, fontWeight: 500 } },
+            ? h('div', { className: 'ldr-warn', style: { borderLeft: '3px solid var(--ldr-accent)', paddingLeft: 8, marginBottom: 10, fontWeight: 500 } },
                 '发送已禁用：' + chief.blockedReason)
-            : null,
+            : (!chief.exists && chief.lastBlocked && chief.lastBlocked.reason
+              ? h('div', { className: 'ldr-warn', style: { borderLeft: '3px solid var(--ldr-accent)', paddingLeft: 8, marginBottom: 10 } },
+                  '最近一次发送被拒绝：' + chief.lastBlocked.reason)
+              : null),
           h('div', { className: 'ldr-label' }, '当前任期'),
           h('div', null, term ? ((term.name || '未命名') + '（第 ' + term.id + ' 任）') : '尚未开启任期'),
           term ? h('div', { className: 'ldr-dim' }, '起于 ' + timeText(term.startedAt)) : null,
@@ -929,15 +1464,45 @@ window.__ModuleLoader__.load({
               ? ((chief.open ? '已创建' : '已关闭') + ' · ' + (chief.cwd || '无 cwd'))
               : '未创建')),
           chief.exists && ov.observeOnly !== true ? h('div', { className: 'ldr-dim' }, 'id ' + String(chief.sessionId || '').slice(0, 28)) : null,
+          // R5：模型来源如实展示。复用宿主 agent 时的 provider/model 来自宿主那次 resume，
+          // 读不到就显示未知，不用插件配置冒充。
+          chief.exists && ov.observeOnly !== true ? h('div', { className: 'ldr-dim' },
+            (function () {
+              const src = chief.modelSource;
+              const label = src === 'host-resume' ? '宿主恢复时装配'
+                : src === 'plugin-config' ? '插件配置指定'
+                : src === 'host-default' ? '宿主默认选择'
+                : src === 'session-selection' ? '会话中选择' : '来源未知';
+              if (chief.modelUnknown === true || !chief.provider) {
+                return '模型：未选择或无法确认；请打开首辅会话，在模型选择器中选择模型';
+              }
+              return '模型：' + String(chief.provider) + ' / ' + String(chief.model || '默认') + '（' + label + '）';
+            })()) : null,
+          // R5：宿主持有句柄时说明释放语义，避免用户以为 release 已经把句柄还回去了。
+          chief.exists && chief.handleOwnership === 'host' ? h('div', { className: 'ldr-dim' },
+            '句柄：由宿主持有（插件无法 dispose；release 会如实报 released:false，需在界面关闭该会话或重启）') : null,
+          // 归组结果：侧栏按 workspace 分组，未归组时必须说清原因，
+          // 否则就是「召见了首辅，但侧栏找不到」（R2 u11/u12）。
+          chief.exists && ov.observeOnly !== true ? h('div', { className: 'ldr-dim' },
+            (function () {
+              const wa = chief.workspaceAttach;
+              if (!wa) return '归组状态未知：尚未尝试归入工作区';
+              if (wa.ok === true) return '已归入工作区 ' + String(wa.workspacePath || wa.workspaceId || '') + '（侧栏可见）';
+              return '未归入工作区：' + String(wa.error || '未知原因') + '（侧栏按工作区分组里看不到它）';
+            })()) : null,
+          chief.exists && ov.observeOnly !== true ? h('button', {
+            className: 'ldr-btn', style: { marginTop: 6 }, onClick: openChiefSession,
+          }, '打开首辅会话') : null,
           ov.observeOnly === true ? null : h('div', { className: 'ldr-dim' }, chief.conversationEnabled
-            ? '对话已接通（只读守卫已验证）'
-            : '对话未接通：召见并通过只读校验后才可对话'),
+            ? (chief.modelUnknown ? '工具范围守卫已验证；请选择模型后再对话' : '对话已接通（工具范围守卫已验证，可提交待确认计划）')
+            : '对话未接通：召见并通过工具范围校验后才可对话'),
           ov.observeOnly === true ? null : h('div', { className: 'ldr-dim' }, chief.briefInjected
             ? ('状态包已注入（' + timeText(chief.briefAt) + '）')
             : '状态包未注入：首辅尚未获得最新背景'),
           ov.observeOnly === true ? null : h('div', { className: 'ldr-dim' },
             '宿主侧在每步模型请求前判定：关闭 / 退休 / 规则收紧 / 状态不可信一律拒绝发送；'
-              + '拒绝原因会写进该会话输入框（composer block），并显示在面板上方。'),
+              + '拒绝原因会写进该会话输入框（composer block），并显示在面板上方。'
+              + '历次首辅会话（已退休、已关闭或被新首辅取代）同样按此判定，打开它也能看到提示。'),
           h('div', { className: 'ldr-label', style: { marginTop: 12 } }, '汇总'),
           h('div', null, '会话 ' + (ov.totals ? ov.totals.sessions : 0) + ' · 项目 ' + ((ov.projects || []).length)),
           h('div', { className: 'ldr-label', style: { marginTop: 12 } }, '最近建议'),
@@ -957,7 +1522,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ldr-dim', style: { marginTop: 12 } },
             '数据生成于 ' + timeText(ov.generatedAt) + '，来自本机索引；建议为空表示尚无可靠来源，不代表没有进展。'),
           h('div', { className: 'ldr-dim', style: { marginTop: 12 } },
-            '首辅为只读模式：不向其他会话发送指令。')));
+            '首辅工具受限；可写入待确认计划，派发需要用户明确确认。计划和任务以面板中的记录为准。'));
+      };
 
       // 状态文件损坏：采集已暂停、规则修改被拒，必须在主视图顶部明确提示
       const corruptBanner = (rulesState && rulesState.stateCorrupt)
@@ -966,74 +1532,247 @@ window.__ModuleLoader__.load({
             + '。请先修复或备份 state.json 后重启；在此期间规则修改会被拒绝，不会按配置文件基线继续采集。')
         : null;
 
-      const tabs = h('div', { className: 'ldr-tabs' },
-        [['projects', '项目'], ['conversations', '对话'], ['scope', '采集范围']].map(function (t) {
-          return h('button', {
-            key: t[0],
-            className: 'ldr-tab' + (view === t[0] ? ' on' : ''),
-            onClick: function () {
-              setView(t[0]);
-              if (t[0] === 'scope' && !cand) loadCandidates();
-            },
-          }, t[1]);
-        }));
-
       const projectNames = (ov.projects || []).map(function (p) { return p.name; });
       const filteredRows = projectFilter
         ? rows.filter(function (s) { return (s.project || 'default') === projectFilter; })
         : rows;
 
-      const filterBar = view === 'conversations'
-        ? h('div', { className: 'ldr-row', style: { marginBottom: 10 } },
-            h('span', { className: 'ldr-label' }, '项目筛选'),
-            h('select', {
-              value: projectFilter,
-              onChange: function (e) { setProjectFilter(e.target.value); },
-              style: { font: 'inherit', padding: '3px 6px', border: '1px solid #d8d0c6', borderRadius: 4, background: '#fff' },
-            },
-              h('option', { value: '' }, '全部项目'),
-              projectNames.map(function (n) { return h('option', { key: n, value: n }, n); })),
-            h('span', { className: 'ldr-dim' }, '共 ' + filteredRows.length + ' 条（与项目视图同一份过滤结果）'))
-        : null;
+      const totals = ov.totals || { sessions: 0, available: 0, unavailable: 0, revoked: 0 };
+      const projectList = ov.projects || [];
+      const dg = ov.diagnostics || null;
+      const lastPoll = dg && dg.lastPoll ? dg.lastPoll : null;
 
-      const scopeSection = view === 'scope'
-        ? buildScopeSection({
-            rulesState: rulesState,
-            cand: cand,
-            diag: ov.diagnostics || null,
-            draft: rulesDraft,
-            err: rulesErr,
-            saving: saving,
-            onChange: function (k, v) {
-              const next = Object.assign({}, rulesDraft);
-              next[k] = v;
-              setRulesDraft(next);
-            },
-            onSave: saveCurrent,
-            onReset: resetToConfig,
-            onLoadCandidates: loadCandidates,
-            onInclude: includeSession,
-          })
-        : null;
+      // 关闭抽屉：同时作废摘要面板代次。否则迟到的 /summaries 响应会把内容写回已关闭的面板。
+      const closeDrawer = function () {
+        sumGenRef.current += 1;
+        setDrawer(null);
+        setSumPanel(null);
+        setSumMsg(null);
+        setSumEdit('');
+        setSumSelected(null);
+      };
+      const openSessionDrawer = function (sid) {
+        setDrawer('session');
+        // 打开即重新判权并取版本；抽屉开着时点别的行就是原地刷新
+        openSummary(sid);
+      };
+      const openScopeDrawer = function () {
+        setDrawer('scope');
+        if (!cand) loadCandidates();
+      };
+
+      const workPending = workSummary && workSummary.unavailable !== true ? workSummary.plans : 0;
+
+      const chip = function (label, value, warn) {
+        return h('span', { className: 'ldr-chip' + (warn ? ' warn' : '') }, label, h('b', null, String(value)));
+      };
+
+      const topbar = h('div', { className: 'ldr-topbar' },
+        h('span', { className: 'ldr-brand' }, '御书房'),
+        h('span', { className: 'ldr-led ' + (ov.observeOnly ? 'warn' : 'ok') }),
+        h('span', { className: 'ldr-dim' }, ov.observeOnly ? '观察版' : '采集已启用'),
+        chip('会话', totals.sessions),
+        chip('可用', totals.available),
+        chip('待确认', totals.unavailable, totals.unavailable > 0),
+        chip('项目', projectList.length),
+        chip('轮询', ov.pollCount),
+        ov.stalePending ? h('span', { className: 'ldr-chip warn' }, '上次未正常收尾') : null,
+        h('span', { className: 'ldr-spacer' }),
+        h('span', { className: 'ldr-dim' }, '生成于 ' + timeText(ov.generatedAt)),
+        h('button', { className: 'ldr-toggle', onClick: load }, '刷新'),
+        window.__wcStandalone === true ? null : h('button', {
+          className: 'ldr-toggle',
+          title: standaloneErr || '',
+          disabled: !standaloneUrl && !standaloneErr,
+          onClick: function () {
+            // 由 host 启动 Edge/Chrome --app 窗口；主窗口 window.open 会被桌面主进程 deny。
+            fetch('/api/dsh-wangchao/open-standalone', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (j) {
+                if (!j || j.ok !== true) setStandaloneErr((j && j.error) || '启动失败');
+                else setStandaloneErr(null);
+              })
+              .catch(function (e) { setStandaloneErr(String((e && e.message) || e)); });
+          },
+        }, standaloneErr ? '独立窗口不可用' : (standaloneUrl ? '打开独立窗口' : '独立窗口准备中…')));
+
+      // 卡片本身就是入口：标题右侧给一个 ›，hover 时变强调色，避免和顶栏重复放按钮
+      const cardButton = function (key, title, badge, children, onClick, tone) {
+        return h('button', { key: key, className: 'ldr-card' + (tone ? ' ldr-card-' + tone : ''), onClick: onClick },
+          h('div', { className: 'ldr-card-title' },
+            h('span', null, title),
+            h('span', { className: 'ldr-chevron' },
+              badge ? h('span', { className: 'ldr-badge', style: { marginRight: 6 } }, String(badge)) : null,
+              '›')),
+          children);
+      };
+
+      const scopeCard = cardButton('scope-card', '采集范围', totals.unavailable, [
+        h('div', { key: 'l1', className: 'ldr-card-line' }, '可用 ' + totals.available + ' · 待确认 ' + totals.unavailable),
+        dg ? h('div', { key: 'l2', className: 'ldr-card-line' }, '索引匹配 ' + dg.liveMatched + ' / ' + dg.liveIndex + ' · state ' + dg.stateSessions) : null,
+        lastPoll
+          ? h('div', { key: 'l3', className: 'ldr-card-line' }, '最近一轮：允许 ' + lastPoll.allowed + ' · 同步 ' + lastPoll.synced + ' · 新增 ' + lastPoll.freshEvents)
+          : h('div', { key: 'l3', className: 'ldr-card-line' }, '尚无轮询记录'),
+        h('div', { key: 'l4', className: 'ldr-card-line ldr-dim' }, '点击查看规则、候选会话与采集诊断'),
+      ], openScopeDrawer, totals.unavailable > 0 ? 'warn' : null);
+
+      const chiefModelText = (function () {
+        if (ov.observeOnly === true) return '观察版未启用首辅';
+        if (!chief.exists) return '未创建';
+        if (chief.modelUnknown === true || !chief.provider) return '模型：未选择或无法确认';
+        const src = chief.modelSource;
+        const label = src === 'host-resume' ? '宿主恢复'
+          : src === 'plugin-config' ? '插件配置'
+          : src === 'host-default' ? '宿主默认'
+          : src === 'session-selection' ? '会话选择' : '来源未知';
+        return '模型：' + String(chief.provider) + ' / ' + String(chief.model || '默认') + '（' + label + '）';
+      })();
+
+      const chiefCard = cardButton('chief-card', '内阁首辅', 0, [
+        h('div', { key: 'l1', className: 'ldr-card-line' }, ov.observeOnly === true
+          ? '观察版未启用（创建／召见／恢复／释放均被拒绝）'
+          : (chief.exists ? ((chief.open ? '已创建' : '已关闭') + ' · ' + (chief.cwd || '无 cwd')) : '未创建')),
+        h('div', { key: 'l2', className: 'ldr-card-line' }, chiefModelText),
+        ov.observeOnly === true ? null : h('div', { key: 'l3', className: 'ldr-card-line' }, chief.conversationEnabled
+          ? (chief.modelUnknown ? '对话：工具范围守卫已验证；请先选择模型' : '对话：已接通')
+          : '对话：未接通（需召见并通过工具范围校验）'),
+        chief.blockedReason
+          ? h('div', { key: 'blocked', className: 'ldr-card-line ldr-warn' }, '发送已禁用：' + chief.blockedReason)
+          : (!chief.exists && chief.lastBlocked && chief.lastBlocked.reason
+            ? h('div', { key: 'blocked', className: 'ldr-card-line ldr-warn' }, '最近一次发送被拒绝：' + chief.lastBlocked.reason)
+            : null),
+        h('div', { key: 'l4', className: 'ldr-card-line ldr-dim' }, '点击查看任期、守卫、归组与阻断原因'),
+      ], function () { setDrawer('chief'); },
+        // 阻断原因用朱砂；未创建/未接通用琥珀，卡片左侧出竖线
+        chief.blockedReason ? 'err'
+          : ((!chief.exists || (ov.observeOnly !== true && !chief.conversationEnabled)) ? 'warn' : null));
+
+      const workCard = cardButton('work-card', '任务队列', workPending, [
+        workSummary == null
+          ? h('div', { key: 'l1', className: 'ldr-card-line ldr-dim' }, '读取中…')
+          : (workSummary.unavailable === true
+            ? h('div', { key: 'l1', className: 'ldr-card-line ldr-warn' }, '任务状态读取失败：' + workSummary.error)
+            : [
+                h('div', { key: 'l1', className: 'ldr-card-line' },
+                  '待确认 ' + workSummary.plans + ' · 在途 ' + (workSummary.running == null ? '未知' : workSummary.running) + ' · 任务 ' + workSummary.tasks),
+                workSummary.withheld > 0
+                  ? h('div', { key: 'l2', className: 'ldr-card-line ldr-warn' }, '有 ' + workSummary.withheld + ' 条记录未显示（授权不可确认或已撤销）')
+                  : null,
+                workSummary.budget && workSummary.budget.unknownCount > 0
+                  ? h('div', { key: 'l3', className: 'ldr-card-line ldr-warn' }, '费用未知 ' + workSummary.budget.unknownCount + ' 条，后续派发已暂停')
+                  : null,
+                workSummary.paused
+                  ? h('div', { key: 'l4', className: 'ldr-card-line ldr-warn' }, '调度器已暂停：' + (workSummary.paused.reason || '原因未知'))
+                  : null,
+              ]),
+        h('div', { key: 'l5', className: 'ldr-card-line ldr-dim' }, '点击进入「计划与任务」页签'),
+      ], function () { closeDrawer(); setView('work'); },
+        workSummary == null ? null
+          : (workSummary.unavailable === true ? 'err'
+            : ((workSummary.paused || workSummary.withheld > 0
+              || (workSummary.budget && workSummary.budget.unknownCount > 0)) ? 'err'
+              : (workPending > 0 ? 'warn' : null))));
+
+      const tabs = h('div', { className: 'ldr-tabs' },
+        [['overview', '总览与对话'], ['work', '计划与任务' + (workPending > 0 ? ' · ' + workPending + ' 待确认' : '')]].map(function (t) {
+          return h('button', {
+            key: t[0],
+            className: 'ldr-tab' + (view === t[0] ? ' on' : ''),
+            onClick: function () { closeDrawer(); setView(t[0]); },
+          }, t[1]);
+        }));
+
+      const filterBar = h('div', { className: 'ldr-row', style: { marginBottom: 10 } },
+        h('span', { className: 'ldr-label' }, '项目筛选'),
+        h('select', {
+          value: projectFilter,
+          onChange: function (e) { setProjectFilter(e.target.value); },
+          style: { font: 'inherit', fontSize: 12, height: 30, padding: '0 10px', border: '1px solid var(--ldr-border)', borderRadius: 6, background: 'var(--ldr-inset)', color: 'var(--ldr-fg)' },
+        },
+          h('option', { value: '' }, '全部项目'),
+          projectNames.map(function (n) { return h('option', { key: n, value: n }, n); })),
+        h('span', { className: 'ldr-dim' }, '共 ' + filteredRows.length + ' 条'));
+
+      const activeSessionId = sumPanel && sumPanel.sessionId ? sumPanel.sessionId : null;
+      const overviewShell = h('div', { className: 'ldr-cols' },
+        h('div', { className: 'ldr-col-side' }, scopeCard, chiefCard, workCard),
+        h('div', { className: 'ldr-col-main' },
+          filterBar,
+          buildSessionsSection(filteredRows, openSessionDrawer, activeSessionId),
+          hiddenNote));
 
       const body = h('div', null,
-        view === 'projects' ? buildOverviewSection(ov) : null,
-        view === 'conversations' ? filterBar : null,
-        view === 'conversations' ? buildSessionsSection(filteredRows, openSummary) : null,
-      sumPanel
-        ? buildSummaryPanel(
-            sumPanel, sumEdit, sumBusy, sumMsg, sumSelected,
-            setSumEdit,
-            function () { sumGenRef.current += 1; setSumPanel(null); setSumMsg(null); setSumSelected(null); },
-            setSumSelected,
-            function (sel) { submitEdit(sumPanel.sessionId, sel); })
-        : null,
-        scopeSection,
-        view !== 'scope' ? hiddenNote : null);
+        view === 'overview' ? overviewShell : null,
+        view === 'work' ? (saving ? h('div', { className: 'ldr-note' }, '规则保存中，计划与任务暂不显示。') : h(WorkPanel)) : null);
+
+      const sessionRow = activeSessionId
+        ? rows.filter(function (s) { return s.id === activeSessionId; })[0] || null
+        : null;
+      const sessionWarn = sessionRow ? sessionWarnings(sessionRow) : [];
+
+      const sessionDrawer = h('div', null,
+        sessionRow
+          ? h('div', { className: 'ldr-field' },
+              h('div', { className: 'ldr-label' }, '会话'),
+              h('div', { style: { overflowWrap: 'anywhere' } }, sessionRow.title || sessionRow.id),
+              h('div', { className: 'ldr-dim', style: { overflowWrap: 'anywhere' } }, sessionRow.id),
+              h('div', { className: 'ldr-dim' }, 'cwd ' + (sessionRow.cwd || '（无 cwd）') + ' · 项目 ' + (sessionRow.project || 'default')),
+              h('div', { className: 'ldr-dim' }, '状态 ' + sessionRow.syncState + ' · ' + (sessionRow.events == null ? '?' : sessionRow.events) + ' 事件'),
+              h('div', { className: 'ldr-dim' }, '最近活动 ' + agoText(sessionRow.lastActivityAt)
+                + ' · 最后成功同步 ' + (sessionRow.lastSyncAt ? timeText(sessionRow.lastSyncAt) : '无记录')),
+              sessionRow.failedAt ? h('div', { className: 'ldr-dim' }, '失败时间 ' + timeText(sessionRow.failedAt)) : null)
+          : h('div', { className: 'ldr-empty' }, '会话已不在当前列表中'),
+        sessionRow
+          ? h('div', { className: 'ldr-field' },
+              h('div', { className: 'ldr-label' }, '失败与覆盖缺口'),
+              sessionWarn.length === 0
+                ? h('div', { className: 'ldr-dim' }, '未发现失败、部分送入或覆盖缺口')
+                : h('div', null, sessionWarn.map(function (w, i) {
+                    return h('div', { key: 'w' + i, className: 'ldr-warn', style: { fontSize: 12 } }, '· ' + w);
+                  })))
+          : null,
+        sumPanel
+          ? buildSummaryPanel(
+              sumPanel, sumEdit, sumBusy, sumMsg, sumSelected,
+              setSumEdit,
+              null,
+              setSumSelected,
+              function (sel) { submitEdit(sumPanel.sessionId, sel); })
+          : null,
+        sessionRow
+          ? h('details', { className: 'ldr-json' },
+              h('summary', { className: 'ldr-dim' }, '接口原始字段（JSON）'),
+              h('pre', null, JSON.stringify(sessionRow, null, 2)))
+          : null);
+
+      const drawerContent = drawer === 'chief' ? chiefSection()
+        : drawer === 'scope' ? h('div', null,
+            buildOverviewSection(ov),
+            buildScopeSection({
+              rulesState: rulesState,
+              cand: cand,
+              diag: ov.diagnostics || null,
+              draft: rulesDraft,
+              err: rulesErr,
+              saving: saving,
+              candLoading: candLoading,
+              onLoadMore: function () { loadCandidates(true); },
+              onChange: function (k, v) {
+                const next = Object.assign({}, rulesDraft);
+                next[k] = v;
+                setRulesDraft(next);
+              },
+              onSave: saveCurrent,
+              onReset: resetToConfig,
+              onLoadCandidates: loadCandidates,
+              onInclude: includeSession,
+            }))
+        : drawer === 'session' ? sessionDrawer
+          : null;
 
       // 观察版提示：让界面上写的权限与实际运行模式一致，不靠读者自己推断
       const observeBanner = ov.observeOnly
-        ? h('div', { className: 'ldr-note', style: { borderLeft: '3px solid #3a6b52', paddingLeft: 10, marginBottom: 12 } },
+        ? h('div', { className: 'ldr-note', style: { borderLeft: '3px solid var(--ldr-ok)', paddingLeft: 10, marginBottom: 12 } },
             '观察版（observeOnly）：只读取被采集的会话内容，不向任何会话发送指令，不安装宿主级发送前守卫，'
             + '不创建／召见／恢复首辅，也不调用摘要模型（仅 dryRun）。'
             + '项目标签与人工摘要修订会写入王朝自己的本地状态，不改动会话日志。')
@@ -1044,16 +1783,20 @@ window.__ModuleLoader__.load({
           banner,
           corruptBanner,
           observeBanner,
+          topbar,
           tabs,
-          h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 10 } },
-            h('span', { className: 'ldr-dim', style: { alignSelf: 'center' } },
-              st.loadedAt ? '上次成功 ' + timeText(st.loadedAt) : ''),
-            h('button', { className: 'ldr-toggle', onClick: load }, '刷新'),
-            h('button', { className: 'ldr-toggle', onClick: function () { setChatOpen(!chatOpen); } },
-              chatOpen ? '收起首辅' : '展开首辅')),
-          body,
-          foot),
-        chatPanel);
+          body),
+        drawer
+          ? h('div', { className: 'ldr-drawer-mask', onClick: closeDrawer },
+              h('div', {
+                className: 'ldr-drawer',
+                onClick: function (e) { if (e && e.stopPropagation) e.stopPropagation(); },
+              },
+                h('div', { className: 'ldr-drawer-head' },
+                  h('span', null, drawer === 'chief' ? '内阁首辅' : (drawer === 'scope' ? '规则与采集范围' : '会话详情')),
+                  h('button', { className: 'ldr-toggle', onClick: closeDrawer }, '关闭（Esc）')),
+                drawerContent))
+          : null);
     }
 
     function apply(ctx) {
@@ -1063,7 +1806,7 @@ window.__ModuleLoader__.load({
       // 直接注入 <style>：styles 内置符号在 factory 作用域不可用（实测截图无样式），
       // 浏览器环境下 document 一定存在，这条路不依赖任何服务。
       try {
-        const styleId = 'wangchao-ui-styles';
+        const styleId = 'leader-ui-styles';
         if (!document.getElementById(styleId)) {
           const el = document.createElement('style');
           el.id = styleId;
@@ -1073,59 +1816,101 @@ window.__ModuleLoader__.load({
             return function () {
               try { const n = document.getElementById(styleId); if (n) n.remove(); } catch (e) {}
             };
-          }, 'wangchao-ui: styles cleanup');
+          }, 'leader-ui: styles cleanup');
         }
       } catch (err) {}
       // 卸载/重载时清掉自己设过的 composer block（插件卸载后没人会替我们清）
       ctx.effect(function () {
         return function () {
-          try {
-            const sid = chiefBlockApplied;
-            if (!sid) return;
-            const sessions = ctx.get('sessions');
-            const conv = sessions && typeof sessions.scope === 'function' ? (sessions.scope(sid) || null) : null;
-            const blocks = conv && typeof conv.get === 'function' ? (conv.get('conversation') || {}).blocks : null;
-            if (blocks && typeof blocks.set === 'function') blocks.set(sid, undefined);
-            chiefBlockApplied = null;
-          } catch (e) {}
+          for (const sid of Array.from(blockApplied.keys())) writeComposerBlock(sid, null);
         };
-      }, 'wangchao-ui: composer block cleanup');
+      }, 'leader-ui: composer block cleanup');
+      // 常驻 composer block 同步：不依赖御书房面板是否挂载。
+      // 判定来源是服务端 GET /chief 的 blockedSessions —— 与宿主 agent/pre-step 的
+      // chiefBlockOf 同源，覆盖退休旧首辅、换代后的旧会话、孤儿登记（R2 u15 的缺口）。
+      // 不再只看「当前 chief」：旧首辅不是当前 chief，但同样会被宿主拒绝。
+      // 请求失败或字段缺失时不猜测，保留上一次提示（清空会让输入框看起来可用）。
+      ctx.effect(function () {
+        const sessions = ctx.get('sessions');
+        if (!sessions || !sessions.list || typeof sessions.list.subscribe !== 'function') return;
+        let gen = 0;
+        let timer = null;
+        const sync = function () {
+          const sid = activeSessionIdOf(sessions);
+          if (!sid) return;
+          const mine = ++gen;
+          fetch('/api/dsh-wangchao/chief?brief=0', { headers: { accept: 'application/json' } })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .catch(function () { return null; })
+            .then(function (j) {
+              if (mine !== gen || j === null) return;   // 过期或请求失败：保留现状，不清空
+              const map = blockedMapOf(j);
+              if (map) { syncComposerBlock(sid, map); return; }
+              // 状态文件不可读：服务端明确返回 unavailable，无法确认哪些会话登记为首辅。
+              // 这里只对首辅前缀会话给保守提示（与宿主 chiefBlockOf 的 state-unreadable
+              // 分支同样按前缀拒绝，二者同源），不是身份识别，也不会命中非首辅会话。
+              if (j.stateCorrupt === true && /^session-chief-/.test(sid)) {
+                writeComposerBlock(sid,
+                  '采集状态文件不可读，无法确认该首辅会话的权限，已暂停发送；请修复状态后重新召见。');
+              }
+            });
+        };
+        const throttled = function () {
+          if (timer) return;
+          timer = setTimeout(function () { timer = null; sync(); }, 400);
+        };
+        // 会话列表变化不足以覆盖「外部状态被改」的情况（例如规则收紧后旧首辅退休，
+        // 或另一个窗口关闭了首辅）：切回页面时补一次同步，并加低频兜底轮询。
+        // 请求很小（只读 JSON），20s 一次的代价远低于「发了没反应」。
+        const onFocus = function () { sync(); };
+        const poll = setInterval(function () { sync(); }, 20000);
+        try { window.addEventListener('focus', onFocus); } catch (e) {}
+        const stop = sessions.list.subscribe(throttled);
+        throttled();
+        return function () {
+          try { if (stop) stop(); } catch (e) {}
+          try { window.removeEventListener('focus', onFocus); } catch (e) {}
+          try { clearInterval(poll); } catch (e) {}
+          if (timer) { clearTimeout(timer); timer = null; }
+          for (const sid of Array.from(blockApplied.keys())) writeComposerBlock(sid, null);
+        };
+      }, 'leader-ui: resident composer block');
       ctx.effect(function () {
         return slots.inject('main', function () {
-          return slots.register({ name: 'main', key: 'wangchao', locale: undefined }, View);
+          return slots.register({ name: 'main', key: 'leader', locale: undefined }, View);
         });
-      }, 'wangchao-ui: main panel');
+      }, 'leader-ui: main panel');
 
-      // 侧栏入口：点击切换到 wangchao 面板（main slot 的 key）
-      function PanelIcon() {
-        const onClick = function () {
-          try {
-            const layout = ctx.get('layout');
-            if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('wangchao');
-          } catch (err) {}
-        };
-        return h('div', {
-          onClick: onClick,
-          title: '御书房',
-          role: 'button',
-          style: { cursor: 'pointer', padding: '4px 6px', fontSize: 12, userSelect: 'none' },
-        }, '御书房');
+      // 宿主侧栏负责按钮、文字与导航；此席位只渲染图标。
+      function PanelIcon(props) {
+        const size = typeof props?.size === 'number' ? props.size : 16;
+        return h('svg', {
+          width: size, height: size, viewBox: '0 0 16 16',
+          fill: 'none', stroke: 'currentColor', strokeWidth: 1.5,
+          strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
+        },
+        h('path', { d: 'M2.25 6.5 8 3l5.75 3.5M3.5 6.5h9M4.5 6.5V13M11.5 6.5V13M2.5 13.25h11' }),
+        h('path', { d: 'M6.75 13v-2.75h2.5V13' }));
       }
       ctx.effect(function () {
         return slots.inject('sidebar.panellist', function () {
           return slots.register({
             name: 'sidebar.panellist',
-            id: 'wangchao',
+            id: 'leader',
             order: 30,
             label: function () { return '御书房'; },
           }, PanelIcon);
         });
-      }, 'wangchao-ui: sidebar entry');
+      }, 'leader-ui: sidebar entry');
     }
 
     return { name: 'dsh-wangchao', inject: ['slots', 'sessions'], apply };
   },
 });
+
+
+
+
 
 
 

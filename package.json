@@ -1,8 +1,8 @@
 {
   "name": "dsh-wangchao",
-  "version": "0.1.0-alpha.1",
+  "version": "0.2.0",
   "type": "module",
-  "description": "DeepSeek Harness plugin: collects cross-session status from an allowlist, with project/session/scope views, on-demand summaries and manual corrections. Observe-only by default.",
+  "description": "DeepSeek Harness plugin: cross-session status from an allowlist, live streaming for active sessions, a read-only chief-of-staff advisor, plans and tasks, and a standalone full-screen view. Observe-only by default.",
   "author": "Macily Lei",
   "license": "MIT",
   "main": "./index.mjs",
@@ -14,9 +14,21 @@
   "files": [
     "index.mjs",
     "client.js",
+    "live-stream.mjs",
+    "mini-react.js",
+    "standalone.html",
+    "plan-tools.mjs",
+    "plan-evidence.mjs",
+    "task-store.mjs",
+    "multi-task.mjs",
+    "governance.mjs",
+    "handoff.mjs",
+    "exec-policy.mjs",
+    "exec-lifecycle.mjs",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "keywords": [
     "dsh",
@@ -25,7 +37,10 @@
     "cordis-plugin",
     "cross-session",
     "observability",
-    "dashboard"
+    "dashboard",
+    "live-stream",
+    "task-scheduler",
+    "standalone-window"
   ],
   "repository": {
     "type": "git",
@@ -43,8 +58,8 @@
       "platform": "web"
     },
     "compat": {
-      "dsh": "0.2.2-rc.1",
-      "note": "Built and tested against DeepSeek Harness 0.2.2-rc.1. Other versions are untested."
+      "dsh": "0.2.2-rc.3",
+      "note": "Built and tested against DeepSeek Harness 0.2.2-rc.3. Other versions are untested."
     }
   }
 }
