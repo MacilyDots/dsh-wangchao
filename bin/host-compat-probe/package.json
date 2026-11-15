@@ -1,0 +1,8 @@
+{
+  "name": "host-compat-probe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Isolated host-compatibility probe for dsh-wangchao (run inside a real DSH host instance).",
+  "main": "./index.mjs"
+}

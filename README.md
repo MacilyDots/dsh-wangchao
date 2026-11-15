@@ -25,7 +25,7 @@
 
 - **摘要状态机**：严格区分 `intent → sent → applied / failed / unknown`；仅 `applied` 计入覆盖率，中断或结果未知的请求归入 `unknown` 待确认队列，**永不自动重发**，防止隐式重复计费。
 - **精确缺口披露**：逐事件记录完整送入（`full`）与截断送入（`partial`），显式计算未覆盖 `seq` 空洞区间，并标记模型已返回但结果未保存（进程内 `unsaved`）的异常状态。
-- **`[seq]` 引用核对**：按最新会话权限实时判权，通过身份指纹（`time + contentLen + sha256`）校验引用与已发送区间；默认不返回原文片段（`bodyReturned=false`），点击仅执行会话级跳转并展示 `seq / 类型 / 时间` 元数据（DSH 尚无公开的 `seq` 级深链接口，插件不伪造该能力）。
+- **`[seq]` 引用核对**：按最新会话权限实时判权，通过身份指纹（`time + contentLen + sha256`）校验引用与已发送区间；默认不返回原文片段（`bodyReturned=false`），本版本点击可跳转会话并展示 `seq / 类型 / 时间` 元数据。
 
 ### 4. 内阁首辅（只读幕僚 Agent）与可追溯交接
 
@@ -76,6 +76,20 @@ dsh plugin --profile <name> add file:<path-to-this-repo>
 ```
 
 重启 DSH 后，点击侧栏「御书房」图标即可打开面板；面板内的「打开独立窗口」可进入全屏工作台。
+
+## 开发与诊断
+
+以下命令在包含相应脚本的源码目录或安装包目录中执行；当前 npm 0.3.1 尚不包含新增诊断命令。源码仓库的 `npm run check` 和 `npm test` 执行离线自检与测试，`npm run audit` 检查工作区、完整本地 Git 历史及 npm 包；远端仍需另行复核。浅克隆无法完整审计历史，会报告失败。
+
+```powershell
+npm run check:locks -- --state-dir "<stateDir>"
+npm run check:locks -- --state-dir "<stateDir>" --confirm "<stateDir>"
+npm run check:host-compat -- --host-root "<DSH安装目录>"
+```
+
+锁诊断默认只读。清理前必须停止所有使用该 `stateDir` 的实例并核对账本；`--confirm` 指定同一目录后，仅本机身份可确认且 PID 明确不存在的锁可进入清理流程。旧格式锁、跨主机、弱身份或进程状态未知均拒绝清理。清理过程中仍有文件竞态，工具无法验证所有实例是否停止，也不处理账本或其他临时文件。`processStartAt` 是估算值，不能证明 PID 未被复用；`hostId` 是机器标识的摘要，不是认证凭据。
+
+宿主兼容探针使用临时 HOME、独立 profile 和假 provider，在真实宿主上检查 `agents`、`tools.guard`、`sessionController.observeEvent` 与 `subagents.startActivation`。退出码 0 表示通过，1 表示失败，2 表示找不到可验证的宿主或跳过。接口通过不代表覆盖 UI、真实模型或其他 DSH 版本；网络采样不能证明不存在所有外连。
 
 ## 许可
 

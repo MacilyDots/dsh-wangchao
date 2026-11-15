@@ -12,3 +12,9 @@ __*
 .credentials*
 *.pem
 *.key
+
+# 测试/审计临时产物兜底（用例默认写系统临时目录，这里防止误提交到仓库）
+.tmp/
+_tmp-tests/
+*-fixtures/
+coverage/

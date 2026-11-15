@@ -1,0 +1,94 @@
+name: CI
+
+# 为什么是 Windows + Node 24：插件的真实宿主是 Windows 桌面端（路径大小写、文件锁、
+# 空格路径、CRLF 这些问题只在 Windows 上成立）；锁文件行为在 Node 24 上也与旧版有差异。
+# 这个工作流跑的是发布树里的真实代码（test/ 直接 import ../index.mjs），不是 tarball 快照。
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (windows-latest, Node 24)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 净室审计要扫 git 历史；浅克隆下 --all 不代表完整历史，审计会直接判失败，
+          # 所以这里必须拿全历史（fetch-depth: 0）。
+          fetch-depth: 0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          check-latest: true
+
+      - name: Toolchain check
+        run: |
+          node -v
+          npm -v
+          node -e "const major = Number(process.versions.node.split('.')[0]); if (major !== 24) { console.error('需要 Node 24，实际 ' + process.version); process.exit(1); }"
+
+      - name: Checks (offline contracts, 4 groups)
+        run: npm run check
+
+      - name: Tests (offline suites)
+        run: npm test
+
+      - name: Clean-room release audit
+        run: npm run audit
+
+      - name: Assert npm pack excludes tests/checks
+        run: |
+          $json = npm pack --dry-run --json --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { Write-Host 'npm pack --dry-run 失败'; exit 1 }
+          $pack = ($json -join "`n") | ConvertFrom-Json
+          $paths = @($pack[0].files | ForEach-Object { $_.path })
+          Write-Host "pack files: $($paths.Count)"
+
+          # 测试资源是硬禁止；scripts/ 的运行辅助代码允许显式进包（由净室审计按白名单核验）。
+          $leaked = @($paths | Where-Object { $_ -match '^(test|checks|\.github)(/|$)' -or $_ -match '\.test\.mjs$' })
+          if ($leaked.Count -gt 0) {
+            Write-Host "测试/检查文件意外进包：$($leaked -join ', ')"
+            exit 1
+          }
+
+          $required = @('index.mjs', 'client.js', 'cordis.patch.yml', 'package.json')
+          $missing = @($required | Where-Object { $paths -notcontains $_ })
+          if ($missing.Count -gt 0) {
+            Write-Host "发布包缺少运行时文件：$($missing -join ', ')"
+            exit 1
+          }
+
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($pack[0].name -ne $pkg.name -or $pack[0].version -ne $pkg.version) {
+            Write-Host "打包元数据与 package.json 不一致：$($pack[0].name)@$($pack[0].version) vs $($pkg.name)@$($pkg.version)"
+            exit 1
+          }
+          Write-Host "发布包内容检查通过：$($pack[0].name)@$($pack[0].version)，$($paths.Count) 个文件，无测试/检查"
+
+      - name: Assert workspace not polluted
+        run: |
+          $status = @(git status --porcelain=v1 -uall)
+          if ($status.Count -gt 0) {
+            Write-Host '测试或审计在仓库内生成了文件：'
+            $status | ForEach-Object { Write-Host $_ }
+            exit 1
+          }
+          Write-Host '工作区干净：测试夹具全部写在系统临时目录'

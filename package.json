@@ -6,6 +6,14 @@
   "author": "Macily Lei",
   "license": "MIT",
   "main": "./index.mjs",
+  "scripts": {
+    "check": "node checks/all.mjs",
+    "test": "node test/all.mjs",
+    "audit": "node scripts/release-audit.mjs",
+    "verify": "npm run check && npm test && npm run audit",
+    "check:locks": "node bin/check-locks.mjs",
+    "check:host-compat": "node bin/check-host-compat.mjs"
+  },
   "exports": {
     ".": "./index.mjs",
     "./client": "./client.js",
@@ -32,7 +40,12 @@
     "exec-budget.mjs",
     "exec-gate-wiring.mjs",
     "writer-epoch-fencing.mjs",
-    "orphan-tmp.mjs"
+    "orphan-tmp.mjs",
+    "bin/check-locks.mjs",
+    "bin/lock-doctor.mjs",
+    "bin/check-host-compat.mjs",
+    "bin/host-compat-probe/index.mjs",
+    "bin/host-compat-probe/package.json"
   ],
   "keywords": [
     "dsh",

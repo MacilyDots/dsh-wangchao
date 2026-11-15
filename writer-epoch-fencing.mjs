@@ -22,13 +22,32 @@
 //  6) 无 lease / TTL / 心跳 / 主动接管；目录残留 writer-epoch tmp、残留写锁一律 fail closed。
 //  7) abort（启动/注册失败清理）同样先走有界 unload（失败/超时 → fail closed 保锁），再在无在途时交接。
 //
+// 锁文件（exec-budget.lock，v2 格式）：
+//   { version:2, pid, processStartAt, hostId, hostIdSource, hostname, token, kind, at }
+//  - pid：Linux/Windows 原始 PID，仅作「本机进程是否仍存在」的线索；
+//  - processStartAt：写入时用 Date.now()-process.uptime() 估算的本进程启动时间（±1s），
+//    只用于诊断（如「锁创建于上次开机之前」），不足以证明 PID 未被复用；
+//  - hostId/hostIdSource：getHostIdentity() 的结果；machine-id 级是强身份，hostname 级是退化弱身份；
+//  - token：释放锁时的唯一凭据（只有持有者自己释放；本模块不做自动接管）。
+// 安全边界（硬性）：
+//  - 本模块绝不自动删除/接管不属于自己的锁；打开遇到 LOCK_HELD 一律 fail closed；
+//  - 任何「锁是否可清理」的判断都必须在进程外由人工显式确认（bin/check-locks.mjs，
+//    npm run check:locks -- --state-dir <dir> --confirm <dir>），并且必须承认：
+//    检查与删除之间没有原子保证，旧版本锁、跨主机、权限不足、容器 PID 命名空间等
+//    情况一律标 unknown、不据此判死；不可能做到「绝对安全」，清理前必须人工确保
+//    没有其它实例正在运行或启动同一 stateDir。
+//
 // 注意：本模块只管 epoch/锁/在途/交接，不实现账本语义（预留、usage 校验、费用）；
 // 结算与 unknown 落盘由注入的 settleAttempt 完成（budget-integration3 里传 budget.settle 即可）。
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 export const LOCK_FILE = 'exec-budget.lock';
+/** 锁文件格式版本：v2 起带 pid / processStartAt / hostId / hostIdSource / hostname 元数据。 */
+export const LOCK_VERSION = 2;
 export const EPOCH_FILE = 'writer-epoch.json';
 export const EPOCH_VERSION = 1;
 const EPOCH_TMP_RE = /^writer-epoch\.json\..+\.tmp$/i;
@@ -38,6 +57,131 @@ const EPOCH_TMP_RE = /^writer-epoch\.json\..+\.tmp$/i;
  * 磁盘 epoch 是跨进程权威，globalThis 注册表是同进程（含重载）的活跃写者与最后交接 epoch 的即时视图。
  */
 export const WRITER_KEY = Symbol.for('dsh-wangchao.budgetWriter');
+/**
+ * 机器标识探测的「可信工具/文件」解析。
+ *
+ * 审计修复（防劫持）：绝不把裸命令名交给 execFileSync —— Windows 的 CreateProcess 搜索顺序包含
+ * 当前工作目录，工作目录里一个同名 reg.exe 就能劫持身份探测（进而伪造 hostId 判定）。因此：
+ *  - win32 固定使用 %SystemRoot%\System32\reg.exe 的绝对路径（不经过 PATH / 当前目录）；
+ *  - darwin 固定使用 /usr/sbin/ioreg 的绝对路径；
+ *  - linux 不 spawn，直接读 /etc/machine-id。
+ * 平台不认识返回 null → 身份退化为 hostname 级弱身份（安全方向）。参数可注入，仅用于测试断言各平台
+ * 解析结果；生产调用不传参。
+ */
+export function resolveMachineIdProbe(platform = process.platform, env = process.env) {
+  if (platform === 'win32') {
+    const root = String(env?.SystemRoot || env?.windir || '');
+    if (!path.win32.isAbsolute(root)) return null;
+    return Object.freeze({
+      kind: 'exec',
+      command: path.win32.join(root, 'System32', 'reg.exe'),
+      args: Object.freeze(['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid']),
+      extract: 'machine-guid',
+    });
+  }
+  if (platform === 'darwin') {
+    return Object.freeze({
+      kind: 'exec',
+      command: '/usr/sbin/ioreg',
+      args: Object.freeze(['-rd1', '-c', 'IOPlatformExpertDevice']),
+      extract: 'platform-uuid',
+    });
+  }
+  if (platform === 'linux') {
+    return Object.freeze({
+      kind: 'files',
+      files: Object.freeze(['/etc/machine-id', '/var/lib/dbus/machine-id']),
+      extract: 'machine-id',
+    });
+  }
+  return null;
+}
+
+function extractMachineId(probe, output) {
+  const text = String(output ?? '');
+  if (probe.extract === 'machine-guid') {
+    const m = /MachineGuid\s+REG_SZ\s+([0-9a-fA-F-]{8,})/.exec(text);
+    return m ? m[1].toLowerCase() : null;
+  }
+  if (probe.extract === 'platform-uuid') {
+    const m = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(text);
+    return m ? m[1].toLowerCase() : null;
+  }
+  return null;
+}
+
+/**
+ * 读取系统级稳定机器标识（尽力而为）。读不到返回 null：绝不让身份探测影响锁的获取/释放。
+ * 只使用 resolveMachineIdProbe 给出的可信绝对路径；失败（不存在/超时/输出不可解析）一律返回 null。
+ * 身份探测只在模块首次需要时执行一次，结果冻结缓存。
+ */
+function readMachineId() {
+  try {
+    const probe = resolveMachineIdProbe();
+    if (!probe) return null;
+    if (probe.kind === 'files') {
+      for (const f of probe.files) {
+        try {
+          const v = fs.readFileSync(f, 'utf8').trim();
+          if (v) return v;
+        } catch {}
+      }
+      return null;
+    }
+    const command = String(probe.command ?? '');
+    // 再兜一层：只接受绝对路径，绝不回退到裸命令名（防 PATH / 当前工作目录劫持）。
+    if (!path.isAbsolute(command)) return null;
+    const out = execFileSync(command, [...probe.args], {
+      encoding: 'utf8', windowsHide: true, timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return extractMachineId(probe, out);
+  } catch {}
+  return null;
+}
+
+let cachedHostIdentity = null;
+/**
+ * 当前主机身份（写入锁与诊断/清理判定共用同一来源，避免两边算法漂移）。
+ *
+ * hostId 是 16 位十六进制摘要：
+ *  - hostIdSource='machine-id'：摘要材料含系统机器标识 → 强身份，跨进程/跨重启稳定，
+ *    不同机器（即使主机名相同）几乎不可能得到同一 hostId；
+ *  - hostIdSource='hostname'：机器标识读不到时的退化材料（hostname+platform+arch）→ 弱身份，
+ *    同名同平台机器会碰撞。清理判定只接受强身份（见 bin/lock-doctor.mjs）。
+ *
+ * hostId 只是「同一台机器」的弱证据，不是安全凭据：同一台机器上仍可能有另一个 PID 命名空间
+ * （容器等）持有同名锁，工具无法证明这一点，所以任何删除都必须人工 --confirm（见 README）。
+ */
+export function getHostIdentity() {
+  if (cachedHostIdentity) return cachedHostIdentity;
+  let hostname = '';
+  try { hostname = os.hostname(); } catch {}
+  const machineId = readMachineId();
+  const hostIdSource = machineId ? 'machine-id' : 'hostname';
+  const material = machineId
+    ? `machine-id:${machineId}`
+    : `hostname:${hostname}|platform:${process.platform}|arch:${process.arch}`;
+  cachedHostIdentity = Object.freeze({
+    hostId: crypto.createHash('sha256').update(material).digest('hex').slice(0, 16),
+    hostIdSource,
+    hostname,
+    platform: process.platform,
+    arch: process.arch,
+  });
+  return cachedHostIdentity;
+}
+
+/**
+ * 进程启动时间（毫秒时间戳）。Node 没有直接 API，用 Date.now() - process.uptime() 反推，
+ * 精度 ~±1s（会受系统时钟调整影响）。只用于诊断提示（例如「锁创建于上次开机之前」），
+ * **不参与**「锁可删除」的判定：无法用它可靠读取任意 PID 的启动时间，也就无法用它证明
+ * PID 未被复用。写入侧每次获取锁时重新计算。
+ */
+export function getProcessStartAt() {
+  const uptimeMs = Math.round(process.uptime() * 1000);
+  return { processStartAt: Date.now() - uptimeMs, processStartAtSource: 'uptime', uptimeMs };
+}
+
 const normalizeDir = (dir) => {
   const r = path.resolve(dir);
   return process.platform === 'win32' ? r.toLowerCase() : r;
@@ -89,8 +233,29 @@ function acquireLock(stateDir, fsImpl) {
   }
   const f = path.join(stateDir, LOCK_FILE);
   const token = crypto.randomUUID();
+  let host;
+  let start;
   try {
-    fsImpl.writeFileSync(f, JSON.stringify({ pid: process.pid, at: Date.now(), token, kind: 'writer-epoch-fencing' }),
+    host = getHostIdentity();
+    start = getProcessStartAt();
+  } catch {
+    // 身份探测异常不能变成锁失败：退化为「无主机元数据」的锁文件，诊断侧会标 unknown。
+    host = { hostId: null, hostIdSource: null, hostname: null };
+    start = { processStartAt: null };
+  }
+  const record = {
+    version: LOCK_VERSION,
+    pid: process.pid,
+    processStartAt: start.processStartAt,
+    hostId: host.hostId,
+    hostIdSource: host.hostIdSource,
+    hostname: host.hostname,
+    token,
+    kind: 'writer-epoch-fencing',
+    at: Date.now(),
+  };
+  try {
+    fsImpl.writeFileSync(f, JSON.stringify(record),
       { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   } catch (e) {
     if (e?.code === 'EEXIST') {
@@ -218,6 +383,8 @@ export function createWriterEpochFence(opts = {}) {
       token: writerId,
       stateDir: path.resolve(stateDir),
       pid: process.pid,
+      hostId: getHostIdentity().hostId,
+      hostIdSource: getHostIdentity().hostIdSource,
       updatedAt: Date.now(),
     });
   } catch (e) {
