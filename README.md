@@ -49,7 +49,13 @@
 
 ## 安装与启用
 
-通过 CLI 安装插件包：
+从 npm 安装（推荐）：
+
+```powershell
+dsh plugin --profile <name> add dsh-wangchao
+```
+
+当前 `latest` 指向 0.3.1；需要固定版本时写 `dsh-wangchao@0.3.1`。也可以直接从本地源码安装：
 
 ```powershell
 dsh plugin --profile <name> add file:<path-to-this-repo>
