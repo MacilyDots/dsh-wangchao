@@ -171,9 +171,14 @@ try {
     // 卡片只有元数据 + 发送证据：没有正文/正文字数/截断标记
     for (const e of r.body.events) {
       assert.deepEqual(Object.keys(e).sort(),
-        ['cited', 'inSentSeqs', 'sentConfirmed', 'sentEvidence', 'sentKind', 'seq', 'time', 'type']);
+        ['anchor', 'cited', 'inSentSeqs', 'sentConfirmed', 'sentEvidence', 'sentKind', 'seq', 'time', 'type']);
       assert.equal('text' in e, false, '不能返回正文');
       assert.equal('fullLength' in e, false);
+      // 定位锚点只允许标识类字段：出现疑似正文的键就是越界
+      if (e.anchor !== null) {
+        assert.deepEqual(Object.keys(e.anchor).sort().filter((k) => !['id', 'kind', 'step', 'turn'].includes(k)), [],
+          'anchor 只允许定位标识字段');
+      }
     }
   });
 

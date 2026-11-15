@@ -388,8 +388,45 @@ export const REF_BODY_POLICY = {
   note: '不返回正文：有限规则脱敏无法验证穷尽（JSON 引号、中文+空格、短 Bearer、含空格值都会漏），'
     + '且「同规则自检无残留」属于自证，不能当作安全保证。这是未满足项，不是已解决。',
   sentSeqsSemantics: 'sentSeqs 只是「入选过发送范围」的序号记录，不保证正文被送入（可能 0 字），也不代表完整',
+  anchorSemantics: 'anchor 只含定位标识（messageId / callId / turn+step），不含正文；'
+    + 'message 与 call 可精确定位到行，turn 只定位到轮次（该事件没有独立可见行）',
   verifyInHost: '核对原文请在宿主会话里打开该会话：宿主对话视图会对已识别凭据做遮罩，并支持逐条显示单个值。',
 };
+
+/**
+ * 事件的可定位锚点：只含定位标识（消息 id / 调用 id / 轮次步号），不含任何正文。
+ *
+ * 宿主聊天视图的行属性决定了能定位到哪一级：
+ *  - `message`：用户消息行可由 messageId 精确定位；
+ *  - `call`：工具调用行可由 callId 精确定位（tool/result 复用所属调用的 callId）；
+ *  - `turn`：助手与流式事件没有独立可见行，只能定位到所在轮次；
+ * 其余事件（turn/start、state 快照、session 元数据等）返回 null，客户端据此如实提示。
+ *
+ * @param event 会话事件
+ * @returns {{kind:'message'|'call'|'turn', id?:string, turn?:number, step?:number}|null}
+ */
+export function refAnchorOf(event) {
+  const type = typeof event?.type === 'string' ? event.type : '';
+  const data = event?.data;
+  if (!data || typeof data !== 'object') return null;
+  if (type === 'user/message') {
+    return typeof data.id === 'string' && data.id !== '' ? { kind: 'message', id: data.id } : null;
+  }
+  if (type === 'tool/call') {
+    return typeof data.callId === 'string' && data.callId !== '' ? { kind: 'call', id: data.callId } : null;
+  }
+  if (type === 'tool/result') {
+    const callId = data?.message?.source?.callId;
+    return typeof callId === 'string' && callId !== '' ? { kind: 'call', id: callId } : null;
+  }
+  if (type === 'assistant/message' || type === 'assistant/attempt' || type === 'assistant/live-chunk') {
+    if (!Number.isSafeInteger(data.turn)) return null;
+    return Number.isSafeInteger(data.step)
+      ? { kind: 'turn', turn: data.turn, step: data.step }
+      : { kind: 'turn', turn: data.turn };
+  }
+  return null;
+}
 
 /**
  * 事件卡片：只给元数据（seq / 类型 / 时间 / 引用区间 / 发送证据）。
@@ -422,6 +459,7 @@ export function selectRefEvents(events, plan, records = null) {
       type: typeof e.type === 'string' ? e.type : null,
       time: Number.isFinite(e.time) ? e.time : null,
       cited: s >= plan.from && s <= plan.to,
+      anchor: refAnchorOf(e),
       inSentSeqs: sent.has(s),
       sentEvidence: evidence,
       sentConfirmed: recMap ? rec !== null : null,

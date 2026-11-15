@@ -1,10 +1,17 @@
 # 变更记录
 
-## 未发布
+## 0.3.2 — 2026-11-16
 
-- 增加发布树离线测试、自检、净室审计和 Windows Node 24 CI；测试与检查不纳入 npm 包。
-- 写锁增加进程启动时间和主机标识摘要，提供只读诊断及显式确认后的清理命令。
-- 增加隔离假 provider 宿主兼容探针，检查四项宿主接口。
+### 新增
+
+- **事件级引用定位**：引用卡片按事件类型给出定位锚点——用户消息与工具调用可精确定位到宿主会话里的对应行，助手与流式事件只能定位到所在轮次。打开会话后有界轮询等待渲染，命中则滚动并高亮；找不到如实提示，不把附近一条说成精确定位。锚点只含定位标识（`messageId` / `callId` / `turn+step`），不返回正文，`bodyReturned=false` 与实时判权口径不变。定位依赖宿主聊天视图的行属性（`data-chat-anchor-key` / `data-chat-call-id` / `data-chat-turn`），属实现细节而非公开契约，宿主改版后失效时表现为「如实说没找到」。
+- **写锁诊断**：`exec-budget.lock` 增加 `processStartAt` 与主机标识摘要；新增 `npm run check:locks` 只读诊断与显式 `--confirm` 清理。只清理「本机强身份 + PID 明确不存在」的锁，旧格式、跨主机、弱身份或进程状态未知一律拒绝。清理前必须停止所有使用同一 `stateDir` 的实例；rename 与恢复仍有竞态，工具不承诺绝不误删，也不处理账本与其它残留。
+- **宿主兼容探针**：`npm run check:host-compat` 用临时 `HOME`/独立 profile 与假 provider，在真实宿主上验证 `agents`、`tools.guard`、`sessionController.observeEvent`、`subagents.startActivation` 四个接口。退出码 `0` 通过 / `1` 失败 / `2` 找不到可验证宿主。版本与 `dsh.compat.dsh` 不同仍会探测，但只报接口级结果，不构成兼容承诺。进程与网络检查均为采样，不覆盖非 Windows 平台、`fork` 子 Agent 与真实模型网络。
+- **离线测试与净室审计**：`npm run check`（4 组边界自检）、`npm test`（12 套离线测试）、`npm run audit`（工作区 + 未跟踪文件 + 完整 Git 历史 + npm 包净室安装），测试与检查不纳入 npm 包。GitHub Actions 在 `windows-latest` + Node 24 上跑全部三项，并要求 `fetch-depth: 0`（浅克隆会让历史审计直接失败）。
+
+### 变更
+
+- `README` 补充诊断命令与限制说明；发布目录不再保留历史 tarball，发布产物改放仓库外。
 
 ## 0.3.1 — 2026-11-15
 

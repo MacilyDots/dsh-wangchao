@@ -2,7 +2,7 @@
 // 跑法：node test/seq-refs.test.mjs
 import assert from 'node:assert/strict';
 import {
-  parseSeqRefs, seqRefSegments, resolveRefWindow, selectRefEvents, REF_BODY_POLICY,
+  parseSeqRefs, seqRefSegments, resolveRefWindow, selectRefEvents, refAnchorOf, REF_BODY_POLICY,
   REF_MAX_SPAN, REF_MAX_WINDOW, REF_CONTEXT,
 } from '../index.mjs';
 
@@ -186,10 +186,12 @@ t('卡片字段只有元数据：没有正文、没有正文字数、没有截�
   assert.deepEqual(list.map((e) => e.seq), [2, 3, 4]);
   for (const e of list) {
     assert.deepEqual(Object.keys(e).sort(),
-      ['cited', 'inSentSeqs', 'sentConfirmed', 'sentEvidence', 'sentKind', 'seq', 'time', 'type']);
+      ['anchor', 'cited', 'inSentSeqs', 'sentConfirmed', 'sentEvidence', 'sentKind', 'seq', 'time', 'type']);
     assert.equal('text' in e, false, '不能返回正文');
     assert.equal('fullLength' in e, false, '不能返回正文字数');
     assert.equal('truncated' in e, false);
+    // 夹具事件没有 id/callId/turn 等定位标识：anchor 必须是 null，不能编造
+    assert.equal(e.anchor, null, 'seq ' + e.seq + ' 夹具无可定位标识，anchor 应为 null');
   }
 });
 
@@ -235,6 +237,48 @@ t('策略常量：正文关闭，原因是「脱敏不可验证」，并写明�
   assert.match(REF_BODY_POLICY.note, /未满足项/);
   assert.match(REF_BODY_POLICY.sentSeqsSemantics, /不保证正文被送入/);
   assert.match(REF_BODY_POLICY.verifyInHost, /宿主/);
+});
+
+// ---------------- refAnchorOf：只产出定位标识 ----------------
+t('refAnchorOf：用户消息给 messageId，工具给 callId，助手给 turn/step', () => {
+  assert.deepEqual(
+    refAnchorOf({ type: 'user/message', data: { id: 'msg-7', content: [{ type: 'text', text: '正文' }] } }),
+    { kind: 'message', id: 'msg-7' });
+  assert.deepEqual(refAnchorOf({ type: 'tool/call', data: { callId: 'call-1', name: 'read' } }),
+    { kind: 'call', id: 'call-1' });
+  assert.deepEqual(refAnchorOf({ type: 'tool/result', data: { message: { source: { callId: 'call-1' } } } }),
+    { kind: 'call', id: 'call-1' });
+  assert.deepEqual(refAnchorOf({ type: 'assistant/message', data: { turn: 2, step: 1 } }),
+    { kind: 'turn', turn: 2, step: 1 });
+  assert.deepEqual(refAnchorOf({ type: 'assistant/attempt', data: { turn: 3 } }), { kind: 'turn', turn: 3 });
+});
+
+t('refAnchorOf：没有标识就是 null，不猜', () => {
+  assert.equal(refAnchorOf({ type: 'user/message', data: { content: [] } }), null);
+  assert.equal(refAnchorOf({ type: 'tool/call', data: {} }), null);
+  assert.equal(refAnchorOf({ type: 'tool/result', data: { message: { content: [] } } }), null);
+  assert.equal(refAnchorOf({ type: 'turn/end', data: { turn: 1 } }), null);
+  assert.equal(refAnchorOf({ type: 'assistant/message', data: { message: { id: 'm' } } }), null);
+  assert.equal(refAnchorOf(null), null);
+});
+
+t('refAnchorOf：锚点里不含正文（只取标识，不碰 content/message 正文）', () => {
+  const secret = 'sk-' + 'deadbeef'.repeat(4);
+  const a = refAnchorOf({ type: 'user/message', data: { id: 'msg-1', content: [{ type: 'text', text: secret }] } });
+  assert.deepEqual(Object.keys(a).sort(), ['id', 'kind']);
+  assert.equal(JSON.stringify(a).includes(secret), false);
+});
+
+t('selectRefEvents：有定位标识的事件带出 anchor，响应里仍无正文', () => {
+  const v = mkVer('[3-3]');
+  const evs = [
+    { seq: 2, type: 'user/message', time: 1000, data: { id: 'msg-2', content: [{ type: 'text', text: '正文甲' }] } },
+    { seq: 3, type: 'tool/call', time: 2000, data: { callId: 'call-3', name: 'read' } },
+  ];
+  const list = selectRefEvents(evs, planFor(3, 3, v));
+  assert.deepEqual(list.find((e) => e.seq === 2).anchor, { kind: 'message', id: 'msg-2' });
+  assert.deepEqual(list.find((e) => e.seq === 3).anchor, { kind: 'call', id: 'call-3' });
+  assert.equal(list.some((e) => 'text' in e), false);
 });
 
 // ---------------- 汇总 ----------------

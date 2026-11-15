@@ -25,7 +25,7 @@
 
 - **摘要状态机**：严格区分 `intent → sent → applied / failed / unknown`；仅 `applied` 计入覆盖率，中断或结果未知的请求归入 `unknown` 待确认队列，**永不自动重发**，防止隐式重复计费。
 - **精确缺口披露**：逐事件记录完整送入（`full`）与截断送入（`partial`），显式计算未覆盖 `seq` 空洞区间，并标记模型已返回但结果未保存（进程内 `unsaved`）的异常状态。
-- **`[seq]` 引用核对**：按最新会话权限实时判权，通过身份指纹（`time + contentLen + sha256`）校验引用与已发送区间；默认不返回原文片段（`bodyReturned=false`），本版本点击可跳转会话并展示 `seq / 类型 / 时间` 元数据。
+- **`[seq]` 引用核对**：按最新会话权限实时判权，通过身份指纹（`time + contentLen + sha256`）校验引用与已发送区间；默认不返回原文片段（`bodyReturned=false`）。引用卡片按事件类型给出定位锚点：用户消息与工具调用可精确定位到宿主会话里的对应行，助手与流式事件只能定位到所在轮次；找不到就如实提示，不把附近一条说成精确定位。锚点只含定位标识（messageId / callId / turn+step），不含正文。
 
 ### 4. 内阁首辅（只读幕僚 Agent）与可追溯交接
 
@@ -55,7 +55,7 @@
 dsh plugin --profile <name> add dsh-wangchao
 ```
 
-当前 `latest` 指向 0.3.1；需要固定版本时写 `dsh-wangchao@0.3.1`。也可以直接从本地源码安装：
+当前 `latest` 指向 0.3.2；需要固定版本时写 `dsh-wangchao@0.3.2`。也可以直接从本地源码安装：
 
 ```powershell
 dsh plugin --profile <name> add file:<path-to-this-repo>
@@ -79,7 +79,7 @@ dsh plugin --profile <name> add file:<path-to-this-repo>
 
 ## 开发与诊断
 
-以下命令在包含相应脚本的源码目录或安装包目录中执行；当前 npm 0.3.1 尚不包含新增诊断命令。源码仓库的 `npm run check` 和 `npm test` 执行离线自检与测试，`npm run audit` 检查工作区、完整本地 Git 历史及 npm 包；远端仍需另行复核。浅克隆无法完整审计历史，会报告失败。
+以下命令在包含相应脚本的源码目录或安装包目录中执行。0.3.2 起 npm 包内含 `bin/` 下的诊断命令。源码仓库的 `npm run check` 和 `npm test` 执行离线自检与测试，`npm run audit` 检查工作区、完整本地 Git 历史及 npm 包；远端仍需另行复核。浅克隆无法完整审计历史，会报告失败。
 
 ```powershell
 npm run check:locks -- --state-dir "<stateDir>"

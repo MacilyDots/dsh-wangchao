@@ -85,12 +85,23 @@ class FakeNode {
   }
 }
 
+// 宿主聊天行的假 DOM：定位按行属性匹配，各用例按需替换
+let locateRows = [];
+function locateRow(attrs) {
+  const el = new FakeNode('div');
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  el.scrollIntoView = function (arg) { el._scrolled = arg; };
+  return el;
+}
+
 const docListeners = { visibilitychange: [] };
 const document = {
   nodeType: 9,
   createElement(tag) { return new FakeNode(tag); },
   createTextNode(text) { return new FakeText(String(text)); },
   getElementById() { return null; },
+  querySelector() { return null; },
+  querySelectorAll() { return locateRows; },
   addEventListener(t, fn) { if (t === 'visibilitychange') docListeners.visibilitychange.push(fn); },
   removeEventListener(t, fn) {
     if (t !== 'visibilitychange') return;
@@ -176,6 +187,11 @@ const refEvents = [3, 4, 5, 6, 7, 8, 9].map((seq) => ({
   type: seq % 2 === 0 ? 'user/message' : 'assistant/message',
   time: now,
   cited: seq >= 5 && seq <= 7,
+  // 定位锚点：3/5 是消息级，7 是轮次级，其余事件没有独立可见行
+  anchor: seq === 3 ? { kind: 'message', id: 'msg-3' }
+    : seq === 5 ? { kind: 'message', id: 'msg-5' }
+      : seq === 7 ? { kind: 'turn', turn: 2, step: 1 }
+        : null,
   inSentSeqs: seq !== 4,
   sentEvidence: 'records',
   sentConfirmed: seq !== 4,
@@ -407,15 +423,43 @@ await t('只渲染元数据与发送证据，DOM 里不出现任何正文', asyn
   assert.deepEqual(errors, []);
 });
 
-await t('宿主会话跳转：调用 uiWorkspace.openSession + layout.selectPanel(null)', async () => {
+await t('宿主会话跳转：openSession + selectPanel(null)，并精确定位到区间第一条可定位事件', async () => {
   resetErrors();
+  navCalls.openSession.length = 0;
+  navCalls.selectPanel.length = 0;
+  // 真实宿主行锚点是 conversationContextKey('input-message', id)：前缀 + messageId 直接拼接
+  locateRows = [locateRow({ 'data-chat-anchor-key': '13:input-messagemsg-5' })];
   const jump = byText('在宿主会话中打开核对');
   assert.equal(jump.length, 1, '缺少跳转按钮');
   jump[0].click();
-  await settle(2);
+  await settle(30);
   assert.deepEqual(navCalls.openSession, [SID]);
   assert.deepEqual(navCalls.selectPanel, [null]);
-  assert.match(textOf(), /已切到宿主会话，请按 seq 与时间核对/);
+  assert.deepEqual(locateRows[0]._scrolled, { block: 'center', behavior: 'smooth' });
+  assert.match(textOf(), /已定位到宿主会话的 seq 5/);
+  assert.deepEqual(errors, []);
+});
+
+await t('事件卡片「定位」：消息级精确命中，轮次级定位到轮次并说明原因', async () => {
+  resetErrors();
+  locateRows = [locateRow({ 'data-chat-turn': '2' })];
+  const locate = byText('定位');
+  assert.equal(locate.length, 3, '只有带锚点的 3 条事件给「定位」');
+  locate[2].click();                       // seq 7：轮次级锚点
+  await settle(30);
+  assert.deepEqual(locateRows[0]._scrolled, { block: 'center', behavior: 'smooth' });
+  assert.match(textOf(), /已定位到宿主会话的 seq 7 所在轮次/);
+  assert.deepEqual(errors, []);
+});
+
+await t('定位失败如实说没找到，不假装已定位', async () => {
+  resetErrors();
+  locateRows = [];
+  byText('在宿主会话中打开核对')[0].click();
+  await settle(320);
+  const txt = textOf();
+  assert.match(txt, /当前已加载窗口里没有 seq 5 对应的行/);
+  assert.equal(/已定位到宿主会话/.test(txt), false, '找不到时不得出现「已定位」');
   assert.deepEqual(errors, []);
 });
 

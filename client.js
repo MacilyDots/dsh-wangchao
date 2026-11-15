@@ -352,17 +352,123 @@ window.__ModuleLoader__.load({
         return { ws, layout: clientCtx.get('layout') };
       } catch (e) { return null; }
     }
-    function jumpToHostSession(sid) {
+    // ---- 宿主聊天行的定位 ----
+    // 行属性（data-chat-anchor-key / data-chat-call-id / data-chat-turn）是宿主聊天视图的
+    // DOM 实现细节，不是公开契约：匹配不到就如实说找不到，绝不把「附近的一条」说成精确定位。
+    const ANCHOR_ROW_SELECTOR = '[data-chat-anchor-key],[data-chat-call-id],[data-chat-turn]';
+    const LOCATE_TRIES = 12;
+    const LOCATE_INTERVAL_MS = 200;
+    const LOCATE_INITIAL_DELAY_MS = 150;
+
+    function anchorRows() {
+      try {
+        if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return [];
+        let root = document;
+        if (typeof document.querySelector === 'function') {
+          const scroller = document.querySelector('[data-conversation-scroll]');
+          if (scroller) root = scroller;
+        }
+        return Array.prototype.slice.call(root.querySelectorAll(ANCHOR_ROW_SELECTOR));
+      } catch (e) { return []; }
+    }
+
+    function rowAttr(el, name) {
+      try {
+        return el && typeof el.getAttribute === 'function' ? el.getAttribute('data-' + name) : null;
+      } catch (e) { return null; }
+    }
+
+    // message / call 是精确定位；turn 只能定位到轮次，exact 区分两者，提示文案据此措辞。
+    function matchAnchorRow(rows, anchor) {
+      if (!anchor || typeof anchor !== 'object') return null;
+      if (anchor.kind === 'message' && typeof anchor.id === 'string' && anchor.id !== '') {
+        for (let i = 0; i < rows.length; i += 1) {
+          const key = rowAttr(rows[i], 'chat-anchor-key') || '';
+          // 真实宿主行形如 `13:input-message` + messageId（前缀与 id 直接拼接）：整串相等或按 id 尾部匹配
+          if (key === anchor.id || (key.length > anchor.id.length && key.slice(-anchor.id.length) === anchor.id)) {
+            return { row: rows[i], exact: true };
+          }
+        }
+        return null;
+      }
+      if (anchor.kind === 'call' && typeof anchor.id === 'string' && anchor.id !== '') {
+        for (let i = 0; i < rows.length; i += 1) {
+          if (rowAttr(rows[i], 'chat-call-id') === anchor.id) return { row: rows[i], exact: true };
+          if (rowAttr(rows[i], 'chat-anchor-key') === 'call:' + anchor.id) return { row: rows[i], exact: true };
+        }
+        return null;
+      }
+      if (anchor.kind === 'turn' && Number.isSafeInteger(anchor.turn)) {
+        const want = String(anchor.turn);
+        for (let i = 0; i < rows.length; i += 1) {
+          if (rowAttr(rows[i], 'chat-turn') === want) return { row: rows[i], exact: false };
+        }
+      }
+      return null;
+    }
+
+    function revealRow(row) {
+      try {
+        if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } catch (e) { /* 元素在滚动前脱离 DOM：交给调用方的「未找到」提示 */ }
+      try {
+        if (!row || !row.style) return;
+        const prev = row.style.outline;
+        const prevOffset = row.style.outlineOffset;
+        row.style.outline = '2px solid rgba(180,53,44,.85)';
+        row.style.outlineOffset = '3px';
+        setTimeout(function () {
+          try { row.style.outline = prev || ''; row.style.outlineOffset = prevOffset || ''; } catch (e) { /* 行已卸载 */ }
+        }, 1600);
+      } catch (e) { /* 高亮只是提示，失败不影响定位结论 */ }
+    }
+
+    // 打开会话后行可能还没渲染：有界轮询，超时如实报「没找到」，不无限等待。
+    function locateInHost(anchor, seq, done) {
+      let tries = 0;
+      const seqText = seq === null ? '该条' : 'seq ' + seq;
+      const attempt = function () {
+        const hit = matchAnchorRow(anchorRows(), anchor);
+        if (hit) {
+          revealRow(hit.row);
+          done(hit.exact
+            ? '已定位到宿主会话的 ' + seqText
+            : '已定位到宿主会话的 ' + seqText + ' 所在轮次（该事件没有独立可见行）');
+          return;
+        }
+        tries += 1;
+        if (tries >= LOCATE_TRIES) {
+          done('已切到宿主会话：当前已加载窗口里没有 ' + seqText + ' 对应的行，请向上滚动加载更早历史后重试');
+          return;
+        }
+        setTimeout(attempt, LOCATE_INTERVAL_MS);
+      };
+      setTimeout(attempt, LOCATE_INITIAL_DELAY_MS);
+    }
+
+    // onProgress：定位是异步的（等宿主渲染出目标行），进度与结论都经回调回传；
+    // 同步结论（缺会话 id / 无导航 / 无锚点）仍用返回值。
+    function jumpToHostSession(sid, ev, onProgress) {
       if (!sid) return '缺少会话 id，无法跳转';
       const t = hostJumpTarget();
       if (!t) return '当前界面没有可用的宿主会话导航（独立窗口里无法跳转，请回主窗口操作）';
       try {
         t.ws.openSession(sid);
         if (t.layout && typeof t.layout.selectPanel === 'function') t.layout.selectPanel(null);
-        return null;
       } catch (e) {
         return '跳转失败：' + String(e && e.message ? e.message : e);
       }
+      const anchor = ev && ev.anchor ? ev.anchor : null;
+      const seq = ev && Number.isSafeInteger(ev.seq) ? ev.seq : null;
+      if (!anchor) {
+        return seq === null
+          ? '已切到宿主会话，请按事件与时间核对'
+          : '已切到宿主会话：seq ' + seq + ' 没有可定位的锚点，请按时间核对';
+      }
+      const notice = typeof onProgress === 'function' ? onProgress : function () {};
+      notice('已切到宿主会话，正在定位 ' + (seq === null ? '该条' : 'seq ' + seq) + '…');
+      locateInHost(anchor, seq, notice);
+      return null;
     }
 
     // 引用读取结果：窗口内事件卡片。撤权只用一句话挡住正文，不返回任何会话内容。
@@ -392,6 +498,11 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ldr-dim' }, '摘要版本与引用记录仍在本地；恢复授权后可再次读取。')));
       }
       const events = Array.isArray(d.events) ? d.events : [];
+      const sid = d.sessionId || refPanel.sessionId;
+      // 主按钮落到引用区间内第一条可定位的事件；没有就退化为纯会话跳转（文案会说明）。
+      const firstLocatable = events.filter(function (e) { return e.cited && e.anchor; })[0]
+        || events.filter(function (e) { return e.anchor; })[0]
+        || null;
       // 只渲染元数据：正文一律不返回（策略见 policy.reason='redaction-unverifiable'）。
       // 发送证据必须如实区分「有逐条记录」与「只有序列表」，后者不能声称已发送正文。
       const sendLabel = function (e) {
@@ -410,7 +521,16 @@ window.__ModuleLoader__.load({
             h('span', null, e.type || '未知类型'),
             h('span', null, e.time ? timeText(e.time) : '时间未知'),
             e.cited ? h('span', null, '引用区间内') : h('span', { className: 'ldr-dim' }, '上下文'),
-            h('span', { className: e.inSentSeqs === true ? 'ldr-dim' : 'ldr-warn' }, sendLabel(e))));
+            h('span', { className: e.inSentSeqs === true ? 'ldr-dim' : 'ldr-warn' }, sendLabel(e)),
+            onJumpHost && e.anchor
+              ? h('button', {
+                  className: 'ldr-toggle',
+                  title: e.anchor.kind === 'turn'
+                    ? '定位到该条所在轮次（该事件没有独立可见行）'
+                    : '在宿主会话里定位到该条',
+                  onClick: function () { onJumpHost(sid, e); },
+                }, '定位')
+              : null));
       });
       const win = d.window || {};
       const unsent = events.filter(function (e) { return e.inSentSeqs === false; }).length;
@@ -437,9 +557,14 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'ldr-row', style: { marginTop: 8 } },
               h('button', {
                 className: 'ldr-btn',
-                onClick: function () { onJumpHost(d.sessionId || refPanel.sessionId); },
+                onClick: function () { onJumpHost(sid, firstLocatable); },
               }, '在宿主会话中打开核对'),
-              h('span', { className: 'ldr-dim' }, '宿主会遮罩已识别凭据，可逐条显示；请按 seq 与时间对照'))
+              h('span', { className: 'ldr-dim' },
+                firstLocatable
+                  ? '宿主会遮罩已识别凭据；打开后定位到 ' + (firstLocatable.anchor.kind === 'turn'
+                    ? 'seq ' + firstLocatable.seq + ' 所在轮次'
+                    : 'seq ' + firstLocatable.seq) + '，其余条目可逐条点「定位」'
+                  : '宿主会遮罩已识别凭据，可逐条显示；请按 seq 与时间对照'))
           : h('div', { className: 'ldr-dim', style: { marginTop: 8 } },
               '独立窗口不能跳到宿主会话：请回主窗口，在宿主对话里按 seq 核对（宿主会遮罩已识别凭据）。'),
         jumpMsg ? h('div', { className: 'ldr-dim' }, jumpMsg) : null));
@@ -2064,9 +2189,9 @@ window.__ModuleLoader__.load({
               },
               // 宿主会话导航：主窗口有 uiWorkspace 才给按钮；独立窗口/缺服务时给固定说明
               hostJumpTarget()
-                ? function (sid) {
-                    setRefJumpMsg(jumpToHostSession(sid)
-                      || '已切到宿主会话，请按 seq 与时间核对（宿主会遮罩已识别凭据）。');
+                ? function (sid, ev) {
+                    const msg = jumpToHostSession(sid, ev, setRefJumpMsg);
+                    if (msg) setRefJumpMsg(msg);
                   }
                 : null,
               refJumpMsg)
