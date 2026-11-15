@@ -1,68 +1,32 @@
-# Changelog
+# 变更记录
 
-## 0.2.0 — 2026-11-15
+## 0.3.0 — 2026-11-15
 
-第二个公开预览：在 0.1 的观察与摘要基座上，加入实时事件流、首辅参议、计划与任务，以及独立窗口。
+### 新增
 
-### 新增功能
-
-- 实时事件流：对允许名单内的活跃会话通过 `sessionController.observeEvent` 建立订阅，冷会话仍由轮询补齐；卸载时刷盘，避免已读事件丢失。
-- 第二版界面：顶栏 + 「总览与对话 / 计划与任务」页签 + 采集范围 / 内阁首辅 / 任务队列三个抽屉。
-- 首辅：召见、打开、关闭、恢复；宿主 `agent/pre-step` 统一判定发送准入；只读守卫验证工具范围。
-- 计划与任务：首辅提议计划、用户确认、派发任务、取消、依赖与证据来源记录。
-- 执行：代码门禁（仅隔离假模型测试配置放行）、本地预算门禁、并行上限。
-- 独立窗口：主机进程拉起 Edge/Chrome `--app` 无边框窗口，加载与侧栏共用同一份 `client.js` 的独立页面；页面地址带启动 token，经连接层认证签发 Cookie。
-- 新增接口：`/api/dsh-wangchao/ui`、`/ui/mini-react.js`、`/ui/client.js`、`/open-standalone`、`/standalone-url`。
+- **B6 崩溃恢复**：`state.json`、`tasks.json`、`governance.json`、`exec-lifecycle.json` 统一 tmp→rename 原子写；主文件缺失、残留 tmp、非法账本记录一律 fail-closed；启动时把未结算的 reserved 转为 unknown，不静默当作空账本。
+- **B2 摘要引用**：会话级引用与 seq/type/time 元数据；实时判权；正文不返回（`bodyReturned=false`），只有元数据与 `openSession`；独立页支持宿主跳转。
+- **执行预算门禁**：`exec-budget.mjs` 逐次预留/结算、单次与累计上限、usage 严校验；`writer-epoch-fencing.mjs` 写权 epoch、有界停止、超时落 unknown、旧回调拒写；`exec-gate-wiring.mjs` 512 输出上限、真实请求计数、单写者磁盘锁与路径别名拒绝。
+- **`cacheReadTokens` 计价**：usage 可带 `cacheReadTokens`；显式配置 `cacheHit` 价目时单独折算，未配置时按标准输入价保守计，并在 `snapshot().note` 与 `pricePerTokenUsd.cacheHitPricedAsInput` 标注口径。
+- **P1 自检**：`checks/` 四组 31 条断言，覆盖执行工具名解析、inject 目标枚举、消息 schema、代码指纹。
 
 ### 变更
 
-- `observeOnly` 默认从 `true` 改为 `false`：完整模式；需要观察版时显式设为 `true`。
-- 面板术语调整：项目/对话合并为「总览与对话」，采集范围移入抽屉。
-- 运行时拆分为多个模块：`live-stream.mjs`、`plan-tools.mjs`、`task-store.mjs`、`multi-task.mjs`、`governance.mjs`、`handoff.mjs`、`exec-policy.mjs`、`exec-lifecycle.mjs`。
+- 版本 0.2.0 → 0.3.0。
+- 生产源码删除 `WC_TEST_REAL_PROVIDER` / `WC_TEST_REAL_MODEL` / `WC_EXEC_MAX_TOKENS_OVERRIDE` / `WC_GATE_REGISTER_FAIL` 四个试验环境变量扩权入口；真实路由白名单固定为 `deepseek-official/deepseek-flash`，`maxTokens` 固定 512。
 
-### 安全默认
+### 验证
 
-- 执行派发入口默认拒绝（要求 `isolatedTestExecution: true` + `fake` 模型）。
-- 预算门禁默认 `budgetLimitUsd: 0`、`budgetPermissions: ['read']`。
-- 独立页面与数据接口一样要求 DSH 认证；无凭据返回 401。
+- 离线：预算 80 项、围栏 35 项、B6 3 套、B2 3 套（24/30/15）、P1 4 组（31 断言）全部通过。
+- 真实执行：隔离 rc.3 宿主 + `deepseek-official/deepseek-flash`，2 次请求、1 次 `read` 工具调用、任务 `succeeded`；账本 `$0.001194`，累计估算 `$0.0142152`。
 
-### 已知限制
+### 已知边界
 
-- 仅在 DeepSeek Harness `0.2.2-rc.3` 上测试。
-- 真实执行链路未验证；执行入口只在隔离假模型测试配置下放行。
-- 首辅对话的权限边界依赖宿主 pre-step，插件不是安全沙箱。
-- 独立窗口依赖本机 Edge/Chrome。
+- 预算为本地估算门禁，不是服务商账单硬上限。
+- 写权锁无 lease/TTL，强杀后需人工清理；无 fsync，掉电语义未证明。
+- 真实执行默认关闭，只有显式隔离测试配置才派发。
 
-## 0.1.0-alpha.1 — 2026-11-08
+## 0.2.0 — 2026-11-12
 
-首个公开预览（观察版）。
-
-### 功能
-
-- 按允许名单采集会话状态：排除规则优先，路径解析失败一律拒绝，默认拒绝。
-- 御书房面板三视图：项目、对话、采集范围。
-- 采集范围可在面板中编辑并即时生效；写入失败回滚，规则不会半生效。
-- 按需摘要：`dryRun` 返回纳入事件、`seq` 范围、截断明细、字符数与成本估算，不调用模型。
-- 摘要覆盖与缺口：逐事件显示完整 / 部分送入 / 未覆盖；「已发出但结果未知」单独排队，不自动重发。
-- 人工修订：摘要修订追加为新版本，原版本与来源范围保留。
-- 首辅会话状态：创建、召见、关闭、恢复的登记与只读守卫（本版本默认关闭对话入口）。
-
-### 安全默认
-
-- `observeOnly` 默认 `true`：首辅入口全部拒绝，不安装宿主 pre-step 守卫。
-- `allowCwds` / `allowSessions` 默认空：不采集任何会话。
-- `allowManualSummary` 默认 `false`：摘要只允许 `dryRun`，真实模型调用被拒绝。
-
-### 设计约束
-
-- 首辅发送准入由宿主 `agent/pre-step` 统一判定：关闭、退休、规则收紧、状态不可信一律拒绝。
-- 拒绝原因写入面板与该会话输入框提示，卸载时清理，不留静默失败。
-- `conversationEnabled` 同时要求守卫已验证且会话处于打开状态，关闭即转 false。
-
-### 已知限制
-
-- 仅在 DeepSeek Harness `0.2.2-rc.1` 上测试。
-- 摘要质量只在一个构造样本上核对过。
-- 崩溃恢复只覆盖「pending 已写、状态未提交」窗口。
-- 摘要校验是格式与引用范围检查，不是内容真实性验证。
-- 首辅真实对话入口的权限边界未完成验证，不随本版本启用。
+- 首次发布：跨会话采集、御书房面板、按需摘要、首辅只读守卫、独立窗口入口。
+- 摘要路由、撤权、人工修订与独立页清理的隔离验证。

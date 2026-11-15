@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createPlanTools } from './plan-tools.mjs';
 import { openTaskStore, DEFAULT_MAX_PARALLEL_TASKS, MAX_PARALLEL_TASKS } from './task-store.mjs';
@@ -14,6 +15,8 @@ import { createChiefHandoff } from './handoff.mjs';
 import { checkExecutionRootWithin, decideExecToolCall, describeLegacyExecRoot, execDispatchGate, isExecChildIdentity, isTaskDirOf, isWithinRoot, normalizeExecPolicy, shouldReleaseChildOnOutcome, taskDirFor, attemptDispose, nearestExistingAncestor, policyForTask } from './exec-policy.mjs';
 import { createExecLifecycle } from './exec-lifecycle.mjs';
 import { createLiveStreams } from './live-stream.mjs';
+import { orphanTmpState } from './orphan-tmp.mjs';
+import { createExecGateWiring, MAX_OUTPUT_TOKENS, MAX_TOTAL_TRIAL_REQUESTS } from './exec-gate-wiring.mjs';
 
 // 执行守卫的跨实例交接键。
 // 依据（2026-11-13 三探针实测，见 safety/harness/guard-owner-probe{,2,3}.mjs）：
@@ -132,11 +135,20 @@ function validateStateShape(s) {
 }
 
 function loadStateDetailed(file) {
-  if (!fs.existsSync(file)) return { state: emptyState(), status: 'missing' };
   let raw;
   try {
     raw = fs.readFileSync(file, 'utf8');
   } catch (e) {
+    if (e?.code === 'ENOENT') {
+      const tmpState = orphanTmpState(file);
+      if (tmpState === 'orphan') {
+        return { state: emptyState(), status: 'corrupt', error: '状态文件缺失且存在临时文件，需人工恢复' };
+      }
+      if (tmpState === 'error') {
+        return { state: emptyState(), status: 'corrupt', error: '状态目录不可读，无法确认是否存在临时文件' };
+      }
+      return { state: emptyState(), status: 'missing' };
+    }
     return { state: emptyState(), status: 'corrupt', error: '读取失败：' + String(e?.message ?? e).slice(0, 200) };
   }
   try {
@@ -216,6 +228,209 @@ export function validateSummary(text, sentSeqs) {
     && !res.missingAdviceDisclaimer;
   return res;
 }
+
+// ---------------- 摘要引用（[seq] / [seqA-seqB]） ----------------
+// 解析口径只有一处（本文件），客户端直接用 /summaries 返回的 segments 渲染，
+// 不自己再解析一遍，避免两端口径漂移。
+// 只认数字与连字符形式（含 en dash / em dash / ~）；[信息不足] 之类的括注不是引用。
+// 上限：单条区间引用跨度 REF_MAX_SPAN、一次窗口最多 REF_MAX_WINDOW 条事件、
+// 单条正文 PREVIEW_CAP 字。超过上限的引用一律标为不可跳转并给出原因，不做截断猜测。
+export const REF_MAX_SPAN = 40;
+export const REF_MAX_WINDOW = 48;
+export const REF_CONTEXT = 2;
+const REF_SEQ_MAX = 1_000_000_000;
+const SEQ_REF_RE = /\[\s*(\d{1,15})(?:\s*[-–—~]\s*(\d{1,15}))?\s*\]/g;
+
+/** 把摘要正文切成 text / ref 两类片段（只做词法切分，不判边界）。 */
+export function parseSeqRefs(text) {
+  const src = typeof text === 'string' ? text : '';
+  const out = [];
+  let last = 0;
+  SEQ_REF_RE.lastIndex = 0;
+  let m;
+  while ((m = SEQ_REF_RE.exec(src)) !== null) {
+    if (m.index > last) out.push({ kind: 'text', text: src.slice(last, m.index) });
+    const a = Number(m[1]);
+    const b = m[2] === undefined ? null : Number(m[2]);
+    const seg = {
+      kind: 'ref',
+      raw: m[0],
+      from: b === null ? a : Math.min(a, b),
+      to: b === null ? a : Math.max(a, b),
+    };
+    seg.span = seg.to - seg.from + 1;
+    if (!Number.isSafeInteger(a) || a < 0 || a > REF_SEQ_MAX
+      || (b !== null && (!Number.isSafeInteger(b) || b < 0 || b > REF_SEQ_MAX))) {
+      seg.invalid = 'out-of-range';
+    } else if (b !== null && b < a) {
+      seg.invalid = 'reversed';
+    } else if (seg.span > REF_MAX_SPAN) {
+      seg.invalid = 'span-too-large';
+    }
+    out.push(seg);
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) out.push({ kind: 'text', text: src.slice(last) });
+  return out;
+}
+
+/**
+ * 给每个引用片段标注「能否跳转」：起止 seq 都必须属于该版本实际发送过的 sentSeqs。
+ * 区间中间有缺口（被过滤 / 超预算）也算越界：模型据此下结论时并没有读到那条，
+ * 面板必须显式说明，不能假装整段都有据。
+ */
+export function seqRefSegments(text, sentSeqs) {
+  const set = new Set((Array.isArray(sentSeqs) ? sentSeqs : [])
+    .map(Number).filter((n) => Number.isSafeInteger(n) && n >= 0));
+  return parseSeqRefs(text).map((seg) => {
+    if (seg.kind !== 'ref') return seg;
+    if (seg.invalid) {
+      return { ...seg, inScope: false, clickable: false, reason: seg.invalid, missing: [], missingCount: 0 };
+    }
+    if (set.size === 0) {
+      return { ...seg, inScope: false, clickable: false, reason: 'version-without-source', missing: [], missingCount: 0 };
+    }
+    const missing = [];
+    for (let s = seg.from; s <= seg.to; s += 1) if (!set.has(s)) missing.push(s);
+    const inScope = missing.length === 0;
+    return {
+      ...seg,
+      inScope,
+      clickable: inScope,
+      reason: inScope ? null : 'not-sent',
+      missing: missing.slice(0, 20),
+      missingCount: missing.length,
+    };
+  });
+}
+
+/**
+ * 引用跳转的请求边界（纯函数，便于单测）：
+ *  - 区间形状：整数、from ≤ to、跨度 ≤ REF_MAX_SPAN；
+ *  - 版本来源：该版本必须有 sentSeqs（旧记录没有就拒绝，不猜）；
+ *  - 引用身份：该区间必须**真的出现在摘要正文里**（`[3]` / `[5-7]`）——
+ *    只校验「起止在 sentSeqs 内」不够：那样任何两个 sent 下标都能通过 API 读到，
+ *    等于把整段 sentSeqs 对直接调用者开放，绕开了「只能跳摘要引用」的 UI 约束；
+ *  - 整段已发送：引用区间内每一条都必须出现在 sentSeqs 里（中间有缺口就拒绝，
+ *    不返回半段，也不把没送过的事件正文顺带带出去）。注意 sentSeqs 只表示
+ *    「这条事件被送入过」，不表示正文被完整送入——摘要侧可能只送了前缀，
+ *    因此这里只声明「送入过」，不宣称内容完整；
+ *  - 窗口边界：只放行引用区间 ±REF_CONTEXT，整体不超过 REF_MAX_WINDOW 条。
+ */
+export function resolveRefWindow({ from, to, version }) {
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from) {
+    return { ok: false, code: 'bad-range', error: '引用区间必须是 ≥0 的整数且 from ≤ to' };
+  }
+  if (to - from + 1 > REF_MAX_SPAN) {
+    return { ok: false, code: 'span-too-large', error: '引用区间跨度过大（上限 ' + REF_MAX_SPAN + ' 条）' };
+  }
+  const sent = new Set((Array.isArray(version?.sentSeqs) ? version.sentSeqs : [])
+    .map(Number).filter((n) => Number.isSafeInteger(n) && n >= 0));
+  if (sent.size === 0) {
+    return { ok: false, code: 'version-without-source', error: '该摘要版本没有记录实际发送范围，无法核对引用边界' };
+  }
+  // 引用身份：只认摘要正文里真实出现过的引用（口径与 seqRefSegments 完全一致）
+  const citedPairs = new Set(
+    parseSeqRefs(version?.summary)
+      .filter((s) => s.kind === 'ref' && !s.invalid)
+      .map((s) => s.from + ':' + s.to),
+  );
+  if (!citedPairs.has(from + ':' + to)) {
+    return { ok: false, code: 'not-a-citation', error: '该区间不是摘要正文里的引用，拒绝读取' };
+  }
+  if (!sent.has(from) || !sent.has(to)) {
+    return { ok: false, code: 'not-cited', error: '该引用的起止 seq 不在本次实际发送范围内，拒绝读取' };
+  }
+  const missing = [];
+  for (let s = from; s <= to; s += 1) if (!sent.has(s)) missing.push(s);
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      code: 'not-fully-sent',
+      error: '引用区间内有 ' + missing.length + ' 条事件未实际送入模型，拒绝读取（不返回半段）',
+    };
+  }
+  const vf = Number.isSafeInteger(version?.fromSeq) ? version.fromSeq : null;
+  const vt = Number.isSafeInteger(version?.toSeq) ? version.toSeq : null;
+  if ((vf !== null && from < vf) || (vt !== null && to > vt)) {
+    return { ok: false, code: 'out-of-version-range', error: '引用超出该摘要版本的来源范围，拒绝读取' };
+  }
+  const lo = Math.max(vf === null ? from : vf, from - REF_CONTEXT);
+  const hi = Math.min(vt === null ? to : vt, to + REF_CONTEXT);
+  let winFrom = lo;
+  let winTo = hi;
+  if (winTo - winFrom + 1 > REF_MAX_WINDOW) {
+    const span = to - from + 1;
+    const room = Math.max(0, REF_MAX_WINDOW - span);
+    winFrom = Math.max(lo, from - Math.floor(room / 2));
+    winTo = Math.min(hi, winFrom + REF_MAX_WINDOW - 1);
+  }
+  return {
+    ok: true,
+    from,
+    to,
+    windowFrom: winFrom,
+    windowTo: winTo,
+    sentSeqs: [...sent],
+    // 引用区间已要求整段发送，这里恒为空；保留字段是为了让旧客户端不必改判空逻辑
+    citedMissing: [],
+  };
+}
+
+// ---------------- 引用事件卡片：正文关闭（脱敏无法保证） ----------------
+// 实测反例：JSON 引号内的密码字段、中文标签加空格、短 Bearer 值、带空格的密码值，
+// 都会从「按规则匹配」里漏出；而「用同一套正则自检无残留」是自证，不能当作安全保证。
+// 因此这里 fail-closed：正文一律不返回，只给元数据与「能否确认实际发送」的标记。
+// 核对原文请到宿主会话——宿主对话视图有官方凭据遮罩，并支持逐值显示。
+export const REF_BODY_POLICY = {
+  bodyReturned: false,
+  reason: 'redaction-unverifiable',
+  note: '不返回正文：有限规则脱敏无法验证穷尽（JSON 引号、中文+空格、短 Bearer、含空格值都会漏），'
+    + '且「同规则自检无残留」属于自证，不能当作安全保证。这是未满足项，不是已解决。',
+  sentSeqsSemantics: 'sentSeqs 只是「入选过发送范围」的序号记录，不保证正文被送入（可能 0 字），也不代表完整',
+  verifyInHost: '核对原文请在宿主会话里打开该会话：宿主对话视图会对已识别凭据做遮罩，并支持逐条显示单个值。',
+};
+
+/**
+ * 事件卡片：只给元数据（seq / 类型 / 时间 / 引用区间 / 发送证据）。
+ *
+ * sentEvidence 区分两件事，避免把「序列表里有它」说成「已经送出正文」：
+ *  - 'records'：能在 summaryRuns 里找到该版本对应的逐条发送记录，
+ *    `sentConfirmed` 为 true/false，`sentKind` 是当时记录的 full/partial；
+ *  - 'seqs-only'：只有 sentSeqs 列表，无法确认这条到底送了多少字，
+ *    `sentConfirmed` 为 null —— 不能据此声称已发送。
+ *
+ * @param events 会话快照里的事件数组
+ * @param plan resolveRefWindow 的返回值
+ * @param records 可选 Map<seq, { kind, charTo, fullChars }>（该版本的逐条发送记录）
+ */
+export function selectRefEvents(events, plan, records = null) {
+  const byseq = new Map();
+  for (const e of Array.isArray(events) ? events : []) {
+    if (Number.isSafeInteger(e?.seq)) byseq.set(e.seq, e);
+  }
+  const sent = new Set(Array.isArray(plan?.sentSeqs) ? plan.sentSeqs : []);
+  const recMap = records instanceof Map ? records : null;
+  const evidence = recMap ? 'records' : 'seqs-only';
+  const out = [];
+  for (let s = plan.windowFrom; s <= plan.windowTo; s += 1) {
+    const e = byseq.get(s);
+    if (!e) continue;
+    const rec = recMap ? (recMap.get(s) ?? null) : null;
+    out.push({
+      seq: s,
+      type: typeof e.type === 'string' ? e.type : null,
+      time: Number.isFinite(e.time) ? e.time : null,
+      cited: s >= plan.from && s <= plan.to,
+      inSentSeqs: sent.has(s),
+      sentEvidence: evidence,
+      sentConfirmed: recMap ? rec !== null : null,
+      sentKind: rec && typeof rec.kind === 'string' ? rec.kind : null,
+    });
+  }
+  return out;
+}
+
 
 function newVersionId() {
   try { return crypto.randomUUID(); } catch { return `v-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`; }
@@ -353,9 +568,35 @@ export async function apply(ctx, config) {
     Math.trunc(Number.isFinite(Number(cfg.maxParallelTasks)) ? Number(cfg.maxParallelTasks) : DEFAULT_MAX_PARALLEL_TASKS)));
   // 本地预算门禁：只做估算与审计，不是服务商账单硬上限。默认额度很小、只允许 read 级执行。
   const budgetLimitUsd = Number.isFinite(Number(cfg.budgetLimitUsd)) ? Math.max(0, Number(cfg.budgetLimitUsd)) : 0;
+  // 单次独立预算上限（用户确认 $0.01）：发送前估算超过它就拒绝，不依赖累计额度。
+  const budgetSingleUsd = cfg.budgetSingleUsd === undefined
+    ? 0.01
+    : (Number.isFinite(Number(cfg.budgetSingleUsd)) && Number(cfg.budgetSingleUsd) > 0 ? Number(cfg.budgetSingleUsd) : NaN);
   const budgetPermissions = Array.isArray(cfg.budgetPermissions) && cfg.budgetPermissions.length
     ? [...new Set(cfg.budgetPermissions)].filter((p) => typeof p === 'string' && p.trim())
     : ['read'];
+  // 执行子 Agent 的路由与输出硬上限：生产只允许已核实的真实路由；不存在环境变量扩权入口。
+  const allowedRealRoutes = [{ provider: 'deepseek-official', model: 'deepseek-flash' }];
+  // 显式把 maxTokens 放进 startActivation.agentOptions，确保线上请求真的带 512，而不是只在账本里记录。
+  const execProvider = typeof cfg.execProvider === 'string' && cfg.execProvider.trim() ? cfg.execProvider.trim() : null;
+  const execModel = typeof cfg.execModel === 'string' && cfg.execModel.trim() ? cfg.execModel.trim() : null;
+  const execMaxTokens = cfg.execMaxTokens === undefined ? MAX_OUTPUT_TOKENS : Number(cfg.execMaxTokens);
+  let execConfigError = null;
+  if (!Number.isSafeInteger(execMaxTokens) || execMaxTokens <= 0 || execMaxTokens > MAX_OUTPUT_TOKENS) {
+    execConfigError = `execMaxTokens 必须是 1..${MAX_OUTPUT_TOKENS} 的安全整数（当前 ${String(cfg.execMaxTokens)}）`;
+  }
+  if ((execProvider || execModel) && !(execProvider && execModel)) {
+    execConfigError = '执行子会话 provider/model 必须同时配置（或都不配置以继承首辅 fake 路由）';
+  }
+  if (execProvider && execModel && !allowedRealRoutes.some((r) => r.provider === execProvider && r.model === execModel)) {
+    execConfigError = `执行子会话真实路由只允许 ${allowedRealRoutes.map((r) => r.provider + '/' + r.model).join('、')}`;
+  }
+  const buildExecAgentOptions = () => {
+    const out = {};
+    if (execProvider && execModel) { out.provider = execProvider; out.model = execModel; }
+    out.maxTokens = execMaxTokens;
+    return out;
+  };
 
   // ---- 索引访问收敛（性能优化，不改授权语义） ----
   // O1 in-flight 单飞：同一瞬间并发发起的多个 listSessions 共享同一次全量索引扫描。
@@ -540,7 +781,17 @@ export async function apply(ctx, config) {
   let state = loaded.state;
   // 状态文件存在但读不出来：原文件保留不动，暂停采集（poll 直接返回），
   // 规则不得因此静默回落到更宽的配置文件基线。
-  const stateLoadIssue = loaded.status === 'corrupt' ? (loaded.error || '状态文件无法读取') : null;
+  let stateLoadIssue = loaded.status === 'corrupt' ? (loaded.error || '状态文件无法读取') : null;
+  // 主文件缺失但采集未收尾标记仍在：若有其他状态产物，说明这不是首次启动，
+  // 原文件是被外部删除/丢失的，不能当作全新状态重建（会丢掉规则与摘要历史）。
+  // 只有「目录里除了 pending 什么都没有」才算被中断的首次启动，维持原行为。
+  if (!stateLoadIssue && loaded.status === 'missing' && fs.existsSync(pendingMark)) {
+    const traces = ['tasks.json', 'governance.json', 'exec-lifecycle.json']
+      .filter((n) => fs.existsSync(path.join(stateDir, n)));
+    if (traces.length > 0) {
+      stateLoadIssue = `状态文件缺失，但采集未收尾标记与 ${traces.join('、')} 仍在，拒绝新建空状态（需人工恢复）`;
+    }
+  }
   // 状态文件损坏时禁止任何写盘：否则会用空状态覆盖待恢复的原文件。
   // 首次发现损坏时先留一份 .corrupt-<ts> 副本作为恢复线索。
   let stateCorruptBackup = null;
@@ -564,6 +815,11 @@ export async function apply(ctx, config) {
   let taskScheduler = null;
   let governance = null;
   let governanceError = null;
+  // 逐次请求的执行预算门禁（attempt 级）：只有开启受控执行且配置了额度时才建立。
+  let execBudget = null;
+  let execBudgetError = null;
+  // 集成接线层：512 硬上限 + 全试验最多 2 个 llm 请求 + 注册失败拒发 + 单写者锁。
+  let execGate = null;
   // 首辅交接：模块在 coverageSummaryOf 之后创建（需覆盖摘要函数）；此处先声明供 brief/close 引用。
   let handoffTools = null;
   const readHandoffView = async () => {
@@ -593,6 +849,9 @@ export async function apply(ctx, config) {
     workspaceRoot: cfg.execWorkspaceRoot,
   });
   const execGuard = { installed: false, error: null, scope: null };
+  // P1 #1：guard 解析工具名时命中非首选字段的次数（宿主契约漂移信号）。
+  // 只计数、不中断：日记第一坑「读错字段导致整批工具被误拒」禁止重演。
+  const guardStats = { execNameFallback: 0, lastFallbackField: null, execNameMissing: 0 };
   // 生命周期记录：活动执行、未确认停止、卸载决策、崩溃/重启门禁。
   const execLifecycle = createExecLifecycle({
     file: path.join(stateDir, 'exec-lifecycle.json'),
@@ -710,6 +969,8 @@ export async function apply(ctx, config) {
   let lastExecAudit = null;
   // 已派发的执行子会话：精确登记的 childId（窗口期由 cwd 落在工作根内兜底）。
   const execChildIds = new Set();
+  // 任务 → 执行子会话：预算结算时按 childId 汇总 attempt 级实际费用。
+  const execChildIdByTask = new Map();
   // 每个执行子会话的任务隔离根：<root>/tasks/<taskId>。guard 只允许该任务目录内的路径，
   // 不再把整个 workspaces 公共根当作允许范围。重启后内存表为空时按 cwd 形状推断。
   const execTaskRoots = new Map();
@@ -971,6 +1232,11 @@ export async function apply(ctx, config) {
     if (cfg.isolatedTestExecution !== true || cfg.chiefProvider !== 'fake' || cfg.chiefModel !== 'fake-1') {
       return { status: 'unknown', failureReason: '执行入口仅供显式启用的隔离假模型测试' };
     }
+    // 门禁未建立（初始化失败/注册失败）时禁止派发：没有 llm/stream 门禁就没有
+    // 512 硬上限、全试验 2 个请求上限与账本约束，宁可拒绝。
+    if (!execGate || execGate.ready !== true) {
+      return { status: 'unknown', failureReason: '执行预算门禁未建立，拒绝派发：' + (execBudgetError || execGate?.error || '未注册') };
+    }
     // 生命周期门禁：插件卸载中，或上次关闭留有未确认停止的执行子会话时，不派发。
     if (execLifecycle.isShuttingDown?.() === true) {
       return { status: 'unknown', failureReason: '插件正在卸载，拒绝派发新执行' };
@@ -1042,6 +1308,7 @@ export async function apply(ctx, config) {
     // 精确匹配，只有任务拿到明确成功终态且审计可读时才释放（见下面 shouldReleaseChildOnOutcome）。
     execChildIds.add(reservedChildId);
     execTaskRoots.set(reservedChildId, { root: taskDirReal, at: Date.now() });
+    if (typeof task?.id === 'string') execChildIdByTask.set(task.id, reservedChildId);
     // 派发前功能探针：用 faux 执行子 Agent 身份真实询问 checkGuards——越界 write / 设备名 /
     // 非白名单工具必须被拒、任务目录内 read 必须放行。不通过就不创建子 Agent（fail closed）。
     // 此时尚未创建任何子会话，撤销本次预留登记不会放宽任何已有会话。
@@ -1092,16 +1359,16 @@ export async function apply(ctx, config) {
         provider: 'spawn',
         label: 'wangchao-task',
         delivery: 'caller',
-        request: {
-          parent,
-          cwd: taskDirReal,
-          agentPreset: execAgentPreset,
-          prompt: [{
-            type: 'text',
-            text: '【执行 Agent 任务】\n工作目录已固定为本次任务目录，只允许在固定工作根内读写。\n\n' + String(task.content).slice(0, 4000),
-          }],
-          maxDepth: 2,
-        },
+        parent,
+        cwd: taskDirReal,
+        agentPreset: execAgentPreset,
+        // 显式钉住执行子会话的输出硬上限（默认 512）：请求真的带 maxTokens，门禁再强校验。
+        agentOptions: buildExecAgentOptions(),
+        prompt: [{
+          type: 'text',
+          text: '【执行 Agent 任务】\n工作目录已固定为本次任务目录，只允许在固定工作根内读写。\n\n' + String(task.content).slice(0, 4000),
+        }],
+        maxDepth: 2,
         signal: ctrl.signal,
       });
       // 启动返回迟到时尽力清理；超时不证明子 Agent 已停止，预留守卫登记仍保留。
@@ -1178,7 +1445,14 @@ export async function apply(ctx, config) {
         }
         return outcome;
       }
-      return { status: 'failed', failureReason: '执行未完成：' + String(result?.stopReason ?? 'unknown'), constraint };
+      // stopReason 只有分类，真实失败原因在 diagnostic（provider/credential/传输错误）。
+      // 只截断记录，不落请求正文；诊断缺失时保持原样，不假装知道原因。
+      const diagnostic = typeof result?.diagnostic === 'string' ? result.diagnostic.trim().slice(0, 240) : '';
+      return {
+        status: 'failed',
+        failureReason: '执行未完成：' + String(result?.stopReason ?? 'unknown') + (diagnostic ? '；' + diagnostic : ''),
+        constraint,
+      };
     } catch (e) {
       if (e?.code === 'EXEC_ABORTED') {
         // 不删除预留登记、不撤守卫：无法确认子 Agent 已停止时，迟到的调用仍必须受限。
@@ -1210,12 +1484,22 @@ export async function apply(ctx, config) {
   };
   // 预算/安全包装：先持久化本地估算门禁，再执行；结算未知或门禁失败时暂停后续补位。
   const budgetIntercept = async ({ task, context, run, scheduler }) => {
+    // 门禁未建立时连治理预留都不做：否则任务看起来在跑，实际没有 llm/stream 约束。
+    if (!execGate || execGate.ready !== true) {
+      const why = '执行预算门禁未建立，拒绝执行：' + (execBudgetError || execGate?.error || '未注册');
+      try { scheduler?.pause?.(why); } catch {}
+      return { status: 'failed', failureReason: why };
+    }
     if (!governance) {
       return { status: 'failed', failureReason: governanceError || '本地预算门禁不可用，拒绝执行' };
     }
     const fakeVerified = cfg.isolatedTestExecution === true && cfg.chiefProvider === 'fake' && cfg.chiefModel === 'fake-1';
-    // 仅在确认是隔离假模型时按 0 估算；否则费用未知，fail closed。
-    const estimateUsd = fakeVerified ? 0 : null;
+    // 任务级预留：假模型按 0；真实执行必须显式配置单任务估算上限（execTaskEstimateUsd），
+    // 否则费用无法预估 → fail closed。实际费用由逐次请求门禁按 usage 汇总后结算。
+    const configuredTaskEstimate = Number(cfg.execTaskEstimateUsd);
+    const estimateUsd = fakeVerified
+      ? 0
+      : (Number.isFinite(configuredTaskEstimate) && configuredTaskEstimate > 0 ? configuredTaskEstimate : null);
     const permission = budgetPermissions[0] ?? 'read';
     try {
       governance.audit({ taskId: task.id, kind: 'dispatch', detail: '准备执行（本地预算门禁）' });
@@ -1237,8 +1521,13 @@ export async function apply(ctx, config) {
     catch (e) { result = { status: 'unknown', failureReason: '执行中断，结果及费用未知：' + String(e?.message ?? e).slice(0, 160) }; }
     finally { context?.signal?.removeEventListener?.('abort', onBudgetAbort); }
     try {
-      if (result?.status === 'succeeded' || result?.status === 'failed') {
-        governance.settle(task.id, { known: true, actualEstimateUsd: 0 });
+      // 费用结算：从逐次请求账本按该执行子会话汇总，不再把成功任务硬编码成 0。
+      // 任何一次请求没有 usage → 任务费用不可确认，按未知结算并暂停后续派发。
+      const childId = execChildIdByTask.get(task.id) ?? null;
+      const totals = childId && execBudget ? execBudget.totalsFor(childId) : null;
+      const known = totals !== null && totals.unknownCount === 0 && totals.reservedCount === 0;
+      if ((result?.status === 'succeeded' || result?.status === 'failed') && known) {
+        governance.settle(task.id, { known: true, actualEstimateUsd: totals.actualUsd });
       } else {
         const settled = governance.settle(task.id, { known: false });
         if (settled.status === 'unknown') scheduler?.pause?.('执行结果费用未知，已暂停后续派发');
@@ -1273,13 +1562,93 @@ export async function apply(ctx, config) {
     } else {
       governanceError = '未配置本地预算额度（budgetLimitUsd），拒绝受控执行';
     }
-    taskScheduler = createScheduler({
-      store: workStore,
-      execute: runExecutionTask,
-      maxParallelTasks,
-      interceptExecute: budgetIntercept,
-    });
-  } catch (e) { workStoreError = String(e?.message ?? e); }
+    // 逐次请求预算门禁：llm/stream 每次请求都过 512 硬上限 + 全试验请求数上限 + 执行子会话账本。
+    // 依据 2026-11-15 探针：拒绝必须 throw（错误 chunk 会被 llm-retry 的 mode:'always' 反复重入）。
+    // 本地估算门禁，不是服务商账单硬上限；估算 = 完整载荷 UTF-8 bytes + 512 tokens。
+    if (budgetLimitUsd > 0) {
+      try {
+        if (execConfigError) throw new Error(execConfigError);
+        if (!Number.isFinite(budgetSingleUsd)) throw new Error('budgetSingleUsd 必须是正有限数');
+        // 测试注入：仅隔离假模型测试可模拟「门禁注册失败」，用于验证失败必须拒发。
+        execGate = createExecGateWiring({
+          stateDir,
+          limitUsd: budgetLimitUsd,
+          maxSingleEstimateUsd: budgetSingleUsd,
+          // 官方高峰价：输入未命中 $0.30/1M、缓存命中 $0.006/1M、输出 $1.20/1M。
+          pricePerTokenUsd: { input: 0.30 / 1e6, output: 1.20 / 1e6, cacheHit: 0.006 / 1e6 },
+          allowedRealRoutes,
+          isExecChild: (sid) => execChildIds.has(sid),
+          onDeny: (rec) => {
+            try {
+              fs.appendFileSync(path.join(stateDir, 'exec-budget-denials.jsonl'),
+                JSON.stringify({ at: rec.at, sessionId: rec.sessionId ?? null, provider: rec.provider ?? null,
+                  model: rec.model ?? null, maxTokens: rec.maxTokens ?? null, message: String(rec.message ?? '').slice(0, 240) }) + '\n');
+            } catch {}
+          },
+          onEstimate: (rec) => {
+            try {
+              fs.appendFileSync(path.join(stateDir, 'exec-gate-estimates.jsonl'), JSON.stringify(rec) + '\n');
+            } catch {}
+          },
+        });
+        execBudget = execGate.budget;
+        execGate.install((event, fn) => ctx.root.on(event, fn));
+        execBudgetError = null;
+        // 卸载时：disposer 返回 stop() 的 Promise（cordis 卸载会 await 异步 disposer）：
+        // stopping 拒绝新请求 → fence 有界卸载监听 → 有界等待在途 → 超时在途落盘 unknown
+        // → epoch+1 交接 → 释放唯一的 exec-budget.lock；失败则 fail closed 保锁并让 ready=false。
+        ctx.effect(() => () => {
+          try { return execGate?.stop?.() ?? Promise.resolve(); } catch (e) { return Promise.reject(e); }
+        }, 'wangchao: exec budget gate');
+      } catch (e) {
+        // 启动/注册失败清理也必须有界完成（fence 的 abort 返回 Promise，必须等它释放锁/交接）。
+        try {
+          const cleanup = e?.fenceCleanup;
+          if (cleanup) await cleanup;
+          else await execGate?.abort?.(String(e?.message ?? e));
+        } catch {}
+        execGate = null;
+        execBudget = null;
+        execBudgetError = String(e?.message ?? e);
+      }
+    } else {
+      execBudgetError = '未配置执行预算额度，逐次请求门禁未建立';
+    }
+    // 任务库缺失时不得当作全新库：未确认停止的执行或预算账本记录说明任务曾经存在，
+    // 静默新建空库会让「结果未知」的执行失去对应任务记录，并允许重复派发。
+    // 预算按账本内容判定（tasks.json 从未派发时本来就不存在，文件存在本身不够）；
+    // 账本解析不了同样按痕迹处理，不猜它为空。
+    if (!fs.existsSync(path.join(stateDir, 'tasks.json'))) {
+      const traces = [];
+      try { if (execRestartStatus().blocked === true) traces.push('未确认停止的执行记录'); } catch { traces.push('生命周期记录不可确认'); }
+      const govFile = path.join(stateDir, 'governance.json');
+      if (fs.existsSync(govFile)) {
+        try {
+          const led = JSON.parse(fs.readFileSync(govFile, 'utf8'));
+          if (!Array.isArray(led?.entries) || led.entries.length + (led?.events?.length ?? 0) > 0) traces.push('预算账本记录');
+        } catch { traces.push('预算记录不可确认'); }
+      } else if (orphanTmpState(govFile) !== 'none') {
+        traces.push('预算账本临时文件');
+      }
+      if (traces.length > 0) {
+        workStore = null;
+        workStoreError = `任务库缺失但存在${traces.join('、')}，需人工核对后恢复：${path.join(stateDir, 'tasks.json')}`;
+      }
+    }
+    if (workStore) {
+      taskScheduler = createScheduler({
+        store: workStore,
+        execute: runExecutionTask,
+        maxParallelTasks,
+        interceptExecute: budgetIntercept,
+      });
+    }
+  } catch (e) {
+    // 存储或预算门禁任一不可用，任务功能整体停用：保留半可用的 workStore
+    // 会让「任务列表」看起来正常，而实际派发已被门禁拒绝。
+    workStore = null;
+    workStoreError = String(e?.message ?? e);
+  }
   let polling = false;
   let stoppingLive = false;
   let pendingPoll = null;
@@ -2203,6 +2572,9 @@ export async function apply(ctx, config) {
             costUsd: v.costUsd ?? null,
             summary: v.summary ?? null,
             originalSummary: v.originalSummary ?? null,
+            // 引用锚点由 host 切分好随正文一起下发：客户端只负责画 chip 与发起按需读取，
+            // 不再自己解析一遍，避免两端正则口径漂移。旧版本缺 sentSeqs 时一律不可跳转。
+            segments: seqRefSegments(v.summary ?? '', v.sentSeqs),
             // 人工修订继承的是原摘要的来源范围，不代表逐句都有事件支持
             sourceInherited: v.edited === true && v.source?.inheritsSourceRange === true,
           }));
@@ -2213,6 +2585,126 @@ export async function apply(ctx, config) {
             cwd: liveCwd,
             count: versions.length,
             versions: view,
+          });
+        },
+      }));
+      // 引用跳转的实时判权：与 /summaries 同源（最新元数据 → decideAccess），
+      // 不信任 state 里保存的旧 cwd / revoked 标记。
+      // 只回机器可读的原因码，不回 host 异常原文：宿主错误信息里可能带路径或正文片段，
+      // 对外的错误文案统一固定，细节只写服务端日志。
+      const liveAccessOf = async (id) => {
+        try {
+          const t = await ctx.sessionQuery.readTitleSnapshot(id);
+          const cwd = t?.session?.cwd ?? null;
+          if (!cwd) return { allowed: false, status: 'unknown', code: 'metadata-missing-cwd', cwd: null };
+          const v = decideAccess(rules, id, cwd);
+          const ok = isAllowed(v);
+          return { allowed: ok, status: ok ? 'allowed' : 'revoked', code: ok ? null : 'denied', cwd };
+        } catch (e) {
+          try { ctx.logger?.warn?.('wangchao: refs 读取最新元数据失败：' + String(e?.message ?? e).slice(0, 200)); } catch {}
+          return { allowed: false, status: 'unknown', code: 'metadata-read-failed', cwd: null };
+        }
+      };
+      const refusalOf = (a) => ({
+        ok: false,
+        allowed: false,
+        status: a.status === 'revoked' ? 'revoked' : 'unknown',
+        code: a.code ?? null,
+        message: a.status === 'revoked'
+          ? '当前会话不在允许范围内，不返回引用内容。恢复授权后可再次查看。'
+          : '授权状态无法确认，不返回引用内容。请稍后重试或检查会话索引。',
+      });
+      // 摘要引用按需读取：点 [seq] / [seqA-seqB] 时只取该版本引用范围内的事件窗口。
+      // 请求边界（全部在返回任何内容之前判定）：
+      //   ① 形状：sessionId / versionId 必须给出；from/to 为 ≥0 整数且 from ≤ to，跨度 ≤ REF_MAX_SPAN；
+      //   ② 授权：读前实时判权，撤权或无法确认 → 只返回状态与固定文案，不含任何会话内容；
+      //   ③ 版本：versionId 必须存在，且该版本带 sentSeqs；
+      //   ④ 引用身份：该区间必须真的出现在摘要正文里（不是任意两个 sent 下标），
+      //      且区间内每条都在 sentSeqs 内（中间有缺口就整段拒绝，不返回半段）；
+      //   ⑤ 窗口：只返回引用区间 ±REF_CONTEXT，最多 REF_MAX_WINDOW 条，
+      //      且只给 seq/type/time 元数据——正文一律不返回（见 REF_BODY_POLICY：脱敏不可证明）；
+      //   ⑥ 读后再判权一次：读取期间撤权 / cwd 变化 → 丢弃已读到的事件。
+      disposers.push(fetchSvc.register({
+        path: '/api/dsh-wangchao/refs',
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: async (request) => {
+          let body;
+          try { body = await request.json(); } catch { return json({ ok: false, error: '请求体不是有效 JSON' }, 400); }
+          const id = typeof body?.sessionId === 'string' ? body.sessionId : '';
+          const versionId = typeof body?.versionId === 'string' ? body.versionId : '';
+          const from = body?.from;
+          const to = body?.to;
+          if (!id) return json({ ok: false, error: '缺少 sessionId' }, 400);
+          if (!versionId) return json({ ok: false, error: '缺少 versionId：引用跳转必须指明是哪个摘要版本的引用' }, 400);
+          if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from) {
+            return json({ ok: false, error: '引用区间必须是 ≥0 的整数且 from ≤ to' }, 400);
+          }
+          if (to - from + 1 > REF_MAX_SPAN) {
+            return json({ ok: false, code: 'span-too-large', error: '引用区间跨度过大（上限 ' + REF_MAX_SPAN + ' 条）' }, 400);
+          }
+          // ② 读前判权（先判权再看版本：撤权时不能从错误码里反推出版本是否存在）
+          const before = await liveAccessOf(id);
+          if (!before.allowed) return json(refusalOf(before));
+          // ③ 版本边界
+          const versions = state.summaries?.[id] ?? [];
+          const version = versions.find((v) => v && v.id === versionId) ?? null;
+          if (!version) return json({ ok: false, allowed: true, error: '摘要版本不存在（可能已被清理），无法定位引用' }, 404);
+          // ④⑤ 引用与窗口边界
+          const plan = resolveRefWindow({ from, to, version });
+          if (!plan.ok) return json({ ok: false, allowed: true, code: plan.code, error: plan.error }, 400);
+          let snap;
+          try { snap = await ctx.sessionQuery.readSession(id); }
+          catch (e) {
+            // host 的异常原文可能包含路径或正文片段：只写日志，对外固定文案
+            try { ctx.logger?.warn?.('wangchao: refs 读取会话失败：' + String(e?.message ?? e).slice(0, 200)); } catch {}
+            // 读取失败也要复判一次授权：失败可能正是撤权后的副作用，
+            // 能把「已撤权」如实报成 revoked，就不该报成模糊的读取失败。
+            const afterErr = await liveAccessOf(id);
+            if (!afterErr.allowed) return json(refusalOf(afterErr));
+            return json({ ok: false, allowed: true, code: 'read-failed', error: '读取会话失败，不返回内容。' }, 502);
+          }
+          // ⑥ 读后复查：撤权、或 cwd 在读取期间变了，已读到的事件一律丢弃
+          const after = await liveAccessOf(id);
+          // cwd 用同一套规范化比较：盘符大小写 / 斜杠方向不同但没有真正换目录时，
+          // 不应当成「读取期间路径变化」把结果丢掉。
+          const cwdChanged = !after.allowed ? false : normPath(after.cwd ?? '') !== normPath(before.cwd ?? '');
+          if (!after.allowed || cwdChanged) {
+            if (!after.allowed) return json(refusalOf(after));
+            return json({
+              ok: false, allowed: false, status: 'changed-during-read',
+              message: '读取期间会话路径发生变化，结果已丢弃，请重试。',
+            });
+          }
+          // 该版本是否有逐条发送记录（summaryRuns）：有就据此标 sentConfirmed，
+          // 没有就只能是 seqs-only，绝不能把「序号在 sentSeqs 里」说成「正文已发送」。
+          const runs = state.summaryRuns?.[id] ?? [];
+          const appliedRun = runs.find((r) => r && r.state === 'applied' && r.summaryVersionId === version.id) ?? null;
+          const sentRecords = appliedRun && Array.isArray(appliedRun.records)
+            ? new Map(appliedRun.records
+              .filter((x) => Number.isSafeInteger(x?.seq))
+              .map((x) => [x.seq, { kind: x.kind, charTo: x.charTo, fullChars: x.fullChars }]))
+            : null;
+          const events = selectRefEvents(snap?.events, plan, sentRecords);
+          return json({
+            ok: true,
+            allowed: true,
+            sessionId: id,
+            versionId,
+            cited: { from: plan.from, to: plan.to },
+            window: { from: plan.windowFrom, to: plan.windowTo },
+            events,
+            // 发送证据来源：records = 有逐条记录；seqs-only = 只有序号列表
+            sentEvidence: sentRecords ? 'records' : 'seqs-only',
+            // 窗口里不在 sentSeqs 里的条数（只报计数，不涉及正文）
+            outOfSentSeqsCount: events.filter((e) => e.inSentSeqs !== true).length,
+            // 返回口径随响应一起下发：调用方不必猜，也拿不到「看起来安全」的正文
+            policy: {
+              ...REF_BODY_POLICY,
+              citationRequired: true,
+              citationEventsSent: true,
+            },
+            checkedAt: Date.now(),
           });
         },
       }));
@@ -2330,6 +2822,8 @@ export async function apply(ctx, config) {
               exec: {
                 guardInstalled: execGuard.installed === true,
                 guardScope: execGuard.scope ?? null,
+                // 门禁接线证据：ready/注册失败原因/512 硬上限/全试验请求记录（不含正文）。
+                budgetGate: execGate ? execGate.snapshot() : { ready: false, error: execBudgetError },
                 fallbackPreset: execFallback.configured,
                 fallbackActive: execFallback.active === true,
                 fallbackScope: execFallback.active === true ? 'parent-cwd' : null,
@@ -2787,9 +3281,19 @@ export async function apply(ctx, config) {
     } else {
       try {
         aTools.guard((exec) => {
-          const name = exec?.name ?? exec?.call?.name ?? exec?.tool ?? null;
+          // P1 #1：统一由 readExecToolName 解析，回退顺序与旧行为一致（exec.name 优先）。
+          const resolved = readExecToolName(exec);
           // 拿不到工具名时不能放行：无法确认来源就拒绝
-          if (typeof name !== 'string') return '首辅会话为只读：无法确认工具名，拒绝调用';
+          if (resolved.ok !== true) {
+            guardStats.execNameMissing += 1;
+            return '首辅会话为只读：无法确认工具名，拒绝调用';
+          }
+          if (resolved.fallback === true) {
+            // 宿主契约漂移：照旧放行，禁止误伤整批；只计数，供 selftest 暴露。
+            guardStats.execNameFallback += 1;
+            guardStats.lastFallbackField = resolved.field;
+          }
+          const name = resolved.name;
           if (CHIEF_READONLY_ALLOW.has(name)) return undefined;
           return `首辅会话为只读：不允许调用工具 "${name}"`;
         });
@@ -3079,7 +3583,8 @@ export async function apply(ctx, config) {
     try {
       briefMsgId = newMsgId();
       const msg = { id: briefMsgId, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: chiefBriefText(brief) }] };
-      if (agent.inbox && typeof agent.inbox.append === 'function') agent.inbox.append('next-turn', msg);
+      assertValidInjectMessage(msg);
+      if (agent.inbox && typeof agent.inbox.append === 'function') agent.inbox.append(assertValidInjectTarget('next-turn'), msg);
       else agent.session.append(msg);
       briefInjected = true;
     } catch (e) {
@@ -3950,9 +4455,10 @@ export async function apply(ctx, config) {
       }
       try {
         const msg = { id: newMsgId(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: String(args.text).slice(0, 2000) }] };
+        assertValidInjectMessage(msg);
         // followup 会唤醒 driver，真正进入一轮模型请求；纯入队不会
         if (typeof h.agent.followup === 'function') h.agent.followup(msg);
-        else if (h.agent.inbox && typeof h.agent.inbox.append === 'function') h.agent.inbox.append('next-turn', msg);
+        else if (h.agent.inbox && typeof h.agent.inbox.append === 'function') h.agent.inbox.append(assertValidInjectTarget('next-turn'), msg);
         else h.agent.session.append(msg);
         return { ok: true, sessionId: state.chief?.sessionId ?? null, msgId: msg.id, length: h.agent.session.length ?? null };
       } catch (e) {
@@ -3966,7 +4472,8 @@ export async function apply(ctx, config) {
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     output: outDef(),
     execute: async () => {
-      if (cfg.observeOnly === true) return { ok: false, error: '观察版未启用首辅（observeOnly）' };
+      // #9：任何返回都带加载态指纹，连「跑不了」的情况也能确认跑的是哪份代码。
+      if (cfg.observeOnly === true) return { ok: false, error: '观察版未启用首辅（observeOnly）', codeFingerprint: LOADED_CODE_FINGERPRINT };
       const al = ctx.get('agentLoop');
       const sampleId = Object.keys(state.sessions ?? {}).find((k) => !state.sessions[k].revoked) ?? null;
       const checks = [];
@@ -3987,7 +4494,7 @@ export async function apply(ctx, config) {
           error: result?.error?.message ?? (result?.error ? String(result.error) : null),
         };
       };
-      const runWith = async (agent) => {
+      const runWith = async (agent, preset) => {
         const aTools = agent?.ctx?.tools;
         if (!aTools) return { error: 'agent 没有 tools 服务' };
         const ro = applyChiefReadonly(agent);
@@ -4007,6 +4514,34 @@ export async function apply(ctx, config) {
         } catch (e) {
           checks.push({ check: 'probeRegistered', pass: false, detail: String(e?.message ?? e).slice(0, 160) });
         }
+        // ① 直接问宿主守卫（宿主 API，不经过 auto-review）：证明首辅只读守卫已注册且判定正确。
+        const guardProbeOf = (name, args) => {
+          try {
+            if (typeof aTools.checkGuards !== 'function') return 'checkGuards 不可用';
+            return normalizeGuardDenial(aTools.checkGuards({
+              callId: 'chief-guard-probe-' + name, name, arguments: args ?? {}, agent,
+            }));
+          } catch (e) { return 'ERR:' + String(e?.message ?? e).slice(0, 120); }
+        };
+        const guardAllow = guardProbeOf('wangchao_status', {});
+        const guardDenyTag = guardProbeOf('wangchao_tag', { sessionId: sampleId || 'selftest', project: 'selftest' });
+        const guardDenyProbe = guardProbeOf('chief_probe_write', {});
+        const rejectText = '首辅会话为只读';
+        checks.push({ check: 'guardAllowsReadonly', pass: guardAllow === null, detail: guardAllow });
+        checks.push({
+          check: 'guardRejectsProbe',
+          pass: typeof guardDenyProbe === 'string' && guardDenyProbe.includes(rejectText),
+          detail: guardDenyProbe,
+        });
+        checks.push({
+          check: 'guardRejectsWriteTool',
+          pass: typeof guardDenyTag === 'string' && guardDenyTag.includes(rejectText),
+          detail: guardDenyTag,
+        });
+
+        // ② execute 路径：走真实 pipeline。宿主的 auto-review 注册在 tools/pre-execute 且 prepend，
+        //    排在 checkGuards 之前；首辅会话处于 auto preset 时它会先拦截。两者都要求 body 未执行，
+        //    但必须区分「被首辅只读守卫拒绝」与「被宿主其它机制中断」，不能混为一谈。
         const call = async (name, args) => {
           try {
             const r = await aTools.execute({
@@ -4019,23 +4554,59 @@ export async function apply(ctx, config) {
             return { throw: String(e?.message ?? e).slice(0, 200), isError: null, denied: false };
           }
         };
+        const blockOrigin = (r) => {
+          if (!r) return 'unknown';
+          const text = String(r.text ?? '') + ' ' + String(r.error ?? '') + ' ' + String(r.throw ?? '');
+          if (r.denied === true || text.includes(rejectText)) return 'guard';
+          if (/Auto review of tool|auto-review/i.test(text)) return 'auto-review';
+          if (r.isError === true) return 'error';
+          return 'none';
+        };
         const allow = await call('wangchao_status', {});
         const denyProbe = await call('chief_probe_write', {});
         const denyTag = await call('wangchao_tag', { sessionId: sampleId || 'selftest', project: 'selftest' });
         if (probeDisposer) { try { probeDisposer(); } catch {} }
-        checks.push({ check: 'allowRuns', pass: allow.isError === false && allow.denied !== true, detail: allow });
+        const allowOrigin = blockOrigin(allow);
+        const denyProbeOrigin = blockOrigin(denyProbe);
+        const denyTagOrigin = blockOrigin(denyTag);
+        if (preset === 'auto') {
+          // auto preset：auto-review 注册在 tools/pre-execute 且 prepend，排在 checkGuards 之前，
+          // 且要求 session 日志里有打开的 step —— selftest 在 step 之外调用，必然先被它拦下。
+          // 此时 execute 路径无法验证「只读放行」，放行语义由 checkGuards（guardAllowsReadonly）覆盖。
+          checks.push({
+            check: 'executeBlockedByHostPolicy',
+            pass: allowOrigin === 'auto-review' && allow.isError === true,
+            detail: { allow, allowOrigin, note: 'auto preset 下 auto-review 前置拦截一切 execute 调用；放行语义见 guardAllowsReadonly' },
+          });
+        } else {
+          checks.push({
+            check: 'allowRuns',
+            pass: allow.isError === false && allowOrigin === 'none',
+            detail: { allow, allowOrigin },
+          });
+        }
         checks.push({
           check: 'denyBeforeExecution',
-          pass: denyProbe.isError === true && denyProbe.denied === true && probeCalls === 0,
-          detail: { denyProbe, probeCalls },
+          pass: probeCalls === 0 && (denyProbeOrigin === 'guard' || denyProbeOrigin === 'auto-review'),
+          detail: { denyProbe, probeCalls, origin: denyProbeOrigin, permissionPreset: preset },
         });
-        checks.push({ check: 'denyWriteTool', pass: denyTag.isError === true && denyTag.denied === true, detail: denyTag });
-        return { readonlyInstalled: ro.installed, allow, denyProbe, denyTag, probeCalls };
+        checks.push({
+          check: 'denyWriteTool',
+          pass: denyTagOrigin === 'guard' || denyTagOrigin === 'auto-review',
+          detail: { denyTag, origin: denyTagOrigin, permissionPreset: preset },
+        });
+        return {
+          readonlyInstalled: ro.installed,
+          allow, denyProbe, denyTag, probeCalls,
+          blockOrigins: { allow: allowOrigin, probe: denyProbeOrigin, write: denyTagOrigin },
+          guardProbes: { allow: guardAllow, probe: guardDenyProbe, write: guardDenyTag },
+          permissionPreset: preset,
+        };
       };
       let agent = chiefAgent;
       let owner = null;
       if (!agent) {
-        if (!state.chief) return { ok: false, error: '尚未创建首辅会话' };
+        if (!state.chief) return { ok: false, error: '尚未创建首辅会话', codeFingerprint: LOADED_CODE_FINGERPRINT };
         try {
           owner = await al.resume(ctx, { resumeSessionId: state.chief.sessionId });
           agent = owner.agent;
@@ -4043,8 +4614,16 @@ export async function apply(ctx, config) {
           return { ok: false, error: '恢复失败：' + String(e?.message ?? e).slice(0, 160) };
         }
       }
+      // auto preset 下 auto-review 会前置拦截 execute 路径，guard 在那里不可达；
+      // 记录 preset 让返回能解释「谁拦的」。
+      const presetOf = (a) => {
+        try {
+          const svc = ctx.root?.get?.('permissionPresets') ?? ctx.get?.('permissionPresets');
+          return typeof svc?.current === 'function' ? (svc.current(a?.session) ?? null) : null;
+        } catch (e) { return 'ERR:' + String(e?.message ?? e).slice(0, 80); }
+      };
       try {
-        const r = await runWith(agent);
+        const r = await runWith(agent, presetOf(agent));
         // 普通上下文（插件自身 ctx）不应被首辅守卫影响：用同一个 checkGuards 做对照，
         // 再真实执行一次普通入口，用来区分「守卫未生效」与「工具本身不可用」。
         let globalProbe = null;
@@ -4077,6 +4656,9 @@ export async function apply(ctx, config) {
           globalProbe,
           usedResume: owner !== null,
           chief: chiefStatus(),
+          // P1 #9：宿主自报加载态指纹，供 assertHostCodeFresh 与磁盘比对。
+          codeFingerprint: LOADED_CODE_FINGERPRINT,
+          guardStats: { ...guardStats },
         };
       } finally {
         if (owner) { try { await owner.dispose?.(); } catch {} }
@@ -5457,3 +6039,133 @@ export async function apply(ctx, config) {
     persistState(); // 尽力再写一次以持久化错误本身
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// P1 基线：可离线自检的边界函数（对应 DEVELOPMENT-DIARY「走过的弯路」#1/#2/#3/#9）
+//
+// 约束：
+//   · 这些函数必须被 apply() 内的生产路径真实调用，不能只服务测试；
+//   · #1 只记录不抛错：整批工具被误拒的伤害大于漏检（日记第一坑）；
+//   · #9 指纹在模块加载时算一次并冻结：动态读盘会跟着磁盘变，永远自洽。
+// ═══════════════════════════════════════════════════════════════════
+
+const __moduleFile = fileURLToPath(import.meta.url);
+const __moduleDir = path.dirname(__moduleFile);
+
+// 参与指纹的文件：自动发现根目录下的源码与配置。
+// 硬编码清单会漏掉新增模块（0.3.0 加 exec-budget / exec-gate-wiring / orphan-tmp /
+// writer-epoch-fencing 时四项全部不在旧清单里，等于假阴性），所以改为扫描。
+const CODE_FILE_RE = /\.(mjs|js|json|ya?ml)$/;
+const CODE_FILE_SKIP_RE = /\.test\.mjs$|\.bak|\.orig$|^\./;
+
+export function discoverCodeFiles(dir = __moduleDir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => e.name)
+      .filter((n) => CODE_FILE_RE.test(n) && !CODE_FILE_SKIP_RE.test(n))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+const CODE_FILES = Object.freeze(discoverCodeFiles());
+
+export function computeDiskFingerprint(baseDir = __moduleDir, files = null) {
+  const list = files ?? discoverCodeFiles(baseDir);
+  const perFile = {};
+  const combined = crypto.createHash('sha256');
+  for (const rel of list) {
+    const full = path.join(baseDir, rel);
+    let digest;
+    try {
+      digest = fs.existsSync(full)
+        ? crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex').slice(0, 16)
+        : 'MISSING';
+    } catch (e) {
+      digest = 'UNREADABLE:' + String(e?.code ?? 'ERR');
+    }
+    perFile[rel] = digest;
+    combined.update(`${rel}:${digest}\n`);
+  }
+  return Object.freeze({
+    bundleHash: combined.digest('hex').slice(0, 16),
+    files: Object.freeze(perFile),
+  });
+}
+
+export const LOADED_CODE_FINGERPRINT = Object.freeze({
+  ...computeDiskFingerprint(__moduleDir),
+  loadedAt: Date.now(),
+  pid: process.pid,
+});
+
+// #1：guard 读错字段（只读 exec.call?.name）导致整批工具被误拒。
+// 回退顺序与 2790 行原实现完全一致，只把「命中非首选字段」暴露成信号。
+export function readExecToolName(exec) {
+  const candidates = [
+    ['name', exec?.name],
+    ['call.name', exec?.call?.name],
+    ['tool', exec?.tool],
+  ];
+  for (const [field, value] of candidates) {
+    if (typeof value === 'string' && value) {
+      return { ok: true, name: value, field, fallback: field !== 'name' };
+    }
+  }
+  return { ok: false, name: null, field: null, reason: 'missing-exec-name' };
+}
+
+// #2：inbox target 写成 'nextTurn'（驼峰），正确值是 'next-turn'。
+const INJECT_TARGETS = Object.freeze(['next-turn']);
+
+export function assertValidInjectTarget(target) {
+  if (typeof target !== 'string' || !INJECT_TARGETS.includes(target)) {
+    throw new Error(
+      `ERR_INVALID_INJECT_TARGET: 非法注入目标 ${JSON.stringify(target)}；允许：${INJECT_TARGETS.join(', ')}`,
+    );
+  }
+  return target;
+}
+
+// #3：注入消息缺 id/source 导致会话日志损坏（format v4 要求 producer-owned source kind）。
+export function assertValidInjectMessage(msg) {
+  if (!msg || typeof msg !== 'object') {
+    throw new Error('ERR_INVALID_INJECT_MESSAGE: 消息必须是对象');
+  }
+  if (typeof msg.id !== 'string' || msg.id.trim() === '') {
+    throw new Error('ERR_INVALID_INJECT_MESSAGE: 缺少非空 id');
+  }
+  if (!msg.source || typeof msg.source !== 'object'
+    || typeof msg.source.kind !== 'string' || msg.source.kind === '') {
+    throw new Error('ERR_INVALID_INJECT_MESSAGE: 缺少 source（format v4 要求 producer-owned source kind）');
+  }
+  return msg;
+}
+
+// #9：测试实际跑在旧的生产代码上（profile 与生产代码哈希不一致时误读结果）。
+export function assertHostCodeFresh(selftestResult, baseDir = __moduleDir) {
+  const host = selftestResult?.codeFingerprint;
+  if (!host || typeof host.bundleHash !== 'string') {
+    throw new Error('ERR_STALE_HOST_CODE: selftest 返回里没有 codeFingerprint，无法确认宿主加载的代码版本');
+  }
+  const disk = computeDiskFingerprint(baseDir).bundleHash;
+  if (host.bundleHash !== disk) {
+    throw new Error(
+      `ERR_STALE_HOST_CODE: 宿主运行代码哈希与磁盘不一致（host=${host.bundleHash} disk=${disk}），请先 reload 插件`,
+    );
+  }
+  return true;
+}
+
+export const __test_hooks__ = Object.freeze({
+  readExecToolName,
+  assertValidInjectTarget,
+  assertValidInjectMessage,
+  computeDiskFingerprint,
+  assertHostCodeFresh,
+  discoverCodeFiles,
+  LOADED_CODE_FINGERPRINT,
+  CODE_FILES,
+});

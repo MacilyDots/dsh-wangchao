@@ -1,6 +1,6 @@
 {
   "name": "dsh-wangchao",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "DeepSeek Harness plugin: cross-session status from an allowlist, live streaming for active sessions, a read-only chief-of-staff advisor, plans and tasks, and a standalone full-screen view. Observe-only by default.",
   "author": "Macily Lei",
@@ -28,7 +28,11 @@
     "cordis.patch.yml",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "exec-budget.mjs",
+    "exec-gate-wiring.mjs",
+    "writer-epoch-fencing.mjs",
+    "orphan-tmp.mjs"
   ],
   "keywords": [
     "dsh",

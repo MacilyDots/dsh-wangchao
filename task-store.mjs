@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { orphanTmpState } from './orphan-tmp.mjs';
 
 // 任务状态机（单进程、单实例独占文件）：
 //   proposed ──confirm──▶ confirmed ──dispatch──▶ running ──┬─▶ succeeded
@@ -124,8 +125,11 @@ export function openTaskStore({ file, authorize, timeoutMs = DEFAULT_DISPATCH_TI
     });
     assertDependencyGraph(tasks);
   } catch (e) {
-    if (e?.code === 'ENOENT') tasks = [];
-    else throw new Error('task state unreadable', { cause: e });
+    if (e?.code !== 'ENOENT') throw new Error('task state unreadable', { cause: e });
+    if (orphanTmpState(file) !== 'none') {
+      throw new Error('task state missing with temporary files; manual recovery required');
+    }
+    tasks = [];
   }
   let poisoned = false;
   // 派发顺序按 createdAt 排序；同毫秒时曾用 id 字典序打破平局，会让「先创建先派发」不成立。

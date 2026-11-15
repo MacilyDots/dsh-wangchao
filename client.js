@@ -148,6 +148,20 @@ window.__ModuleLoader__.load({
       '.ldr-drawer-head{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:14px 0;margin-bottom:14px;background:var(--ldr-drawer);border-bottom:1px solid var(--ldr-border);font-size:16px;font-weight:700;color:var(--ldr-fg)}',
       '.ldr-json{margin-top:14px}',
       '.ldr-json pre{margin:6px 0 0;padding:10px;background:var(--ldr-inset);border:1px solid var(--ldr-border);border-radius:6px;font:11px/1.55 "Cascadia Mono","Consolas",ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;max-height:280px;overflow:auto}',
+      // 摘要正文里的 [seq] 锚点：可跳转的是实心朱批，不可跳转的只留虚线边框并说明原因。
+      // 不用 <a>：抽屉里点链接会整页跳转，这里只能按钮 + onClick。
+      '.ldr-ref{display:inline-flex;align-items:center;height:18px;padding:0 6px;margin:0 1px;border:1px solid var(--ldr-accent-border);border-radius:4px;background:var(--ldr-accent-bg);color:var(--ldr-accent);font:inherit;font-size:11px;line-height:1;cursor:pointer;vertical-align:baseline;font-variant-numeric:tabular-nums}',
+      '.ldr-ref:hover{background:var(--ldr-accent);color:var(--ldr-surface)}',
+      '.ldr-ref.on{background:var(--ldr-accent);color:var(--ldr-surface)}',
+      '.ldr-ref.off{border-style:dashed;border-color:var(--ldr-border2);background:transparent;color:var(--ldr-faint);cursor:not-allowed}',
+      '.ldr-ref.off:hover{background:transparent;color:var(--ldr-faint)}',
+      '.ldr-ref-panel{margin-top:10px;border:1px solid var(--ldr-border);border-radius:8px;background:var(--ldr-inset);padding:10px 12px}',
+      '.ldr-ref-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;font-size:12px;font-weight:600;color:var(--ldr-muted)}',
+      '.ldr-ref-card{border-top:1px solid var(--ldr-soft);padding:8px 0}',
+      '.ldr-ref-card.first{border-top:none;padding-top:2px}',
+      '.ldr-ref-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;color:var(--ldr-fg2);margin-bottom:2px}',
+      '.ldr-ref-meta{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:11px;color:var(--ldr-faint);margin-bottom:4px}',
+      '.ldr-ref-seq{display:inline-block;min-width:34px;padding:0 5px;border-radius:4px;background:var(--ldr-selected);color:var(--ldr-fg);font-variant-numeric:tabular-nums;text-align:center}',
       '@media (max-width:1100px){.ldr-cols{grid-template-columns:1fr}.ldr-col-side{position:static;flex-direction:row;flex-wrap:wrap}.ldr-col-side .ldr-card{flex:1 1 280px}.ldr-ellipsis{max-width:200px}.ldr-title{max-width:200px}}',
     ].join('\n');
 
@@ -270,7 +284,168 @@ window.__ModuleLoader__.load({
         h('div', { className: 'ldr-table-wrap' }, h('table', { className: 'ldr-table' }, th, h('tbody', null, trs))));
     }
 
-    function buildSummaryPanel(panel, edit, busy, msg, selected, onEdit, onClose, onSelect, onSubmit) {
+    // ---- 摘要引用跳转（B2） ----
+    // 正文里的 [seq] / [seqA-seqB] 由 host 在 /summaries 里切好 segments 下发，
+    // 客户端不重复解析：一份正则、一处口径，避免两端标出的可点击区间不一致。
+    function refLabel(seg) {
+      return seg.from === seg.to ? String(seg.from) : seg.from + '–' + seg.to;
+    }
+
+    function refReasonText(seg) {
+      const r = seg && seg.reason;
+      if (r === 'version-without-source') return '该版本没有记录实际发送范围（旧记录），无法核对引用';
+      if (r === 'not-sent') {
+        const n = typeof seg.missingCount === 'number' ? seg.missingCount : (Array.isArray(seg.missing) ? seg.missing.length : 0);
+        return '区间内有 ' + n + ' 条事件未实际送入模型（被过滤或超出预算），无法定位整段原文';
+      }
+      if (r === 'reversed') return '引用区间写反了（起始 seq 大于结束 seq）';
+      if (r === 'span-too-large') return '引用区间过大，按条读取会拉取过多内容';
+      if (r === 'out-of-range') return '引用序号超出有效范围';
+      return '原因未知';
+    }
+
+    function buildRefText(v, refPanel, onRef) {
+      const segs = Array.isArray(v.segments) ? v.segments : null;
+      const bodyStyle = { whiteSpace: 'pre-wrap', margin: '4px 0' };
+      if (!segs) {
+        // 旧 host / 旧版本没有 segments：退回纯文本，不猜引用
+        return v.summary
+          ? h('div', { style: bodyStyle }, v.summary)
+          : h('div', { className: 'ldr-dim' }, '正文缺失');
+      }
+      if (!v.summary) return h('div', { className: 'ldr-dim' }, '正文缺失');
+      const parts = segs.map(function (seg, i) {
+        if (!seg || seg.kind !== 'ref') {
+          return h('span', { key: 't' + i }, seg && typeof seg.text === 'string' ? seg.text : '');
+        }
+        // 没有稳定 id 的旧版本无法定位版本边界：即使 sentSeqs 齐全也不能点，
+        // 否则会出现「看起来可点、点了没反应」。原因要显式写给用户看。
+        const hasVersionId = !!(v && v.id);
+        const clickable = seg.clickable === true && hasVersionId;
+        const on = refPanel && refPanel.versionId === v.id
+          && Number(refPanel.from) === seg.from && Number(refPanel.to) === seg.to;
+        // 显示原文里的写法（seg.raw），不重排：用户核对时看到的必须和存下来的摘要一字不差。
+        // 归一化只在 title 里用于描述（如 [5~7] 也说 seq 5–7）。
+        return h('button', {
+          key: 'r' + i,
+          type: 'button',
+          className: 'ldr-ref' + (clickable ? '' : ' off') + (on ? ' on' : ''),
+          title: clickable
+            ? '按需读取 seq ' + refLabel(seg) + ' 的元数据（每次读取都会重新判权）'
+            : '不可跳转：' + (seg.clickable === true && !hasVersionId ? '该版本缺少稳定 id，无法定位版本边界' : refReasonText(seg)),
+          disabled: !clickable,
+          onClick: function () { if (clickable) onRef(v, seg); },
+        }, typeof seg.raw === 'string' && seg.raw ? seg.raw : '[' + refLabel(seg) + ']');
+      });
+      return h('div', { style: bodyStyle }, parts);
+    }
+
+    // 正文核对交给宿主会话：宿主对话视图已有官方凭据遮罩（可逐条显示单个值），
+    // 插件不自己渲染正文。这里只负责把用户带到那个会话。
+    function hostJumpTarget() {
+      try {
+        // 独立页面没有宿主会话导航能力：不要给出点了没反应的按钮
+        if (window.__wcStandalone === true) return null;
+        if (!clientCtx || typeof clientCtx.get !== 'function') return null;
+        const ws = clientCtx.get('uiWorkspace');
+        if (!ws || typeof ws.openSession !== 'function') return null;
+        return { ws, layout: clientCtx.get('layout') };
+      } catch (e) { return null; }
+    }
+    function jumpToHostSession(sid) {
+      if (!sid) return '缺少会话 id，无法跳转';
+      const t = hostJumpTarget();
+      if (!t) return '当前界面没有可用的宿主会话导航（独立窗口里无法跳转，请回主窗口操作）';
+      try {
+        t.ws.openSession(sid);
+        if (t.layout && typeof t.layout.selectPanel === 'function') t.layout.selectPanel(null);
+        return null;
+      } catch (e) {
+        return '跳转失败：' + String(e && e.message ? e.message : e);
+      }
+    }
+
+    // 引用读取结果：窗口内事件卡片。撤权只用一句话挡住正文，不返回任何会话内容。
+    function buildRefPanel(refPanel, onCloseRef, onRetryRef, onJumpHost, jumpMsg) {
+      if (!refPanel) return null;
+      const spanText = refPanel.from === refPanel.to
+        ? String(refPanel.from) : refPanel.from + '–' + refPanel.to;
+      const head = h('div', { className: 'ldr-ref-head' },
+        h('span', null, '引用原文 · seq ' + spanText),
+        h('button', { className: 'ldr-toggle', onClick: onCloseRef }, '收起'));
+      const box = function (children) {
+        return h('section', { className: 'ldr-sec' }, head,
+          h('div', { className: 'ldr-ref-panel' }, children));
+      };
+      if (refPanel.loading) return box(h('div', { className: 'ldr-dim' }, '读取中…（读取前后各判权一次）'));
+      const d = refPanel.data || null;
+      if (refPanel.error) {
+        return box(h('div', null,
+          h('div', { className: 'ldr-err' }, '读取失败：' + refPanel.error),
+          h('div', { className: 'ldr-row', style: { marginTop: 8 } },
+            h('button', { className: 'ldr-btn', onClick: onRetryRef }, '重试'))));
+      }
+      if (!d) return box(h('div', { className: 'ldr-dim' }, '没有返回结果'));
+      if (d.allowed === false) {
+        return box(h('div', null,
+          h('div', { className: 'ldr-err' }, d.message || '当前会话不在允许范围内，不返回引用内容。'),
+          h('div', { className: 'ldr-dim' }, '摘要版本与引用记录仍在本地；恢复授权后可再次读取。')));
+      }
+      const events = Array.isArray(d.events) ? d.events : [];
+      // 只渲染元数据：正文一律不返回（策略见 policy.reason='redaction-unverifiable'）。
+      // 发送证据必须如实区分「有逐条记录」与「只有序列表」，后者不能声称已发送正文。
+      const sendLabel = function (e) {
+        if (e.sentEvidence === 'records') {
+          if (e.sentConfirmed !== true) return '无发送记录（未确认发送）';
+          return e.sentKind === 'partial' ? '发送记录：部分正文' : '发送记录：整条正文';
+        }
+        return e.inSentSeqs === true
+          ? '仅在发送序列表内（未确认正文发送）'
+          : '不在发送序列表内';
+      };
+      const cards = events.map(function (e, i) {
+        return h('div', { key: 'e' + e.seq, className: 'ldr-ref-card' + (i === 0 ? ' first' : '') },
+          h('div', { className: 'ldr-ref-meta', style: { marginBottom: 0 } },
+            h('span', { className: 'ldr-ref-seq' }, String(e.seq)),
+            h('span', null, e.type || '未知类型'),
+            h('span', null, e.time ? timeText(e.time) : '时间未知'),
+            e.cited ? h('span', null, '引用区间内') : h('span', { className: 'ldr-dim' }, '上下文'),
+            h('span', { className: e.inSentSeqs === true ? 'ldr-dim' : 'ldr-warn' }, sendLabel(e))));
+      });
+      const win = d.window || {};
+      const unsent = events.filter(function (e) { return e.inSentSeqs === false; }).length;
+      return box(h('div', null,
+        h('div', { className: 'ldr-dim', style: { marginBottom: 6 } },
+          '窗口 seq ' + (win.from == null ? '?' : win.from) + '–' + (win.to == null ? '?' : win.to)
+          + ' · ' + events.length + ' 条'
+          + (d.outOfSentSeqsCount ? ' · ' + d.outOfSentSeqsCount + ' 条不在发送序列表内' : '')
+          + ' · 只给元数据，不返回正文'),
+        events.length === 0
+          ? h('div', { className: 'ldr-dim' }, '该窗口内没有可显示的事件（可能已被压缩或超出当前日志范围）')
+          : cards,
+        (d.policy && (d.policy.disclaimer || d.policy.note)) || d.note
+          ? h('div', { className: 'ldr-dim', style: { marginTop: 8 } }, (d.policy && (d.policy.disclaimer || d.policy.note)) || d.note)
+          : null,
+        d.policy && d.policy.verifyInHost
+          ? h('div', { className: 'ldr-dim' }, d.policy.verifyInHost)
+          : null,
+        d.policy && d.policy.sentSeqsSemantics
+          ? h('div', { className: 'ldr-dim' }, d.policy.sentSeqsSemantics)
+          : null,
+        // 正文定位：不在插件里渲染，直接交给宿主会话（宿主负责遮罩与逐条显示）
+        onJumpHost
+          ? h('div', { className: 'ldr-row', style: { marginTop: 8 } },
+              h('button', {
+                className: 'ldr-btn',
+                onClick: function () { onJumpHost(d.sessionId || refPanel.sessionId); },
+              }, '在宿主会话中打开核对'),
+              h('span', { className: 'ldr-dim' }, '宿主会遮罩已识别凭据，可逐条显示；请按 seq 与时间对照'))
+          : h('div', { className: 'ldr-dim', style: { marginTop: 8 } },
+              '独立窗口不能跳到宿主会话：请回主窗口，在宿主对话里按 seq 核对（宿主会遮罩已识别凭据）。'),
+        jumpMsg ? h('div', { className: 'ldr-dim' }, jumpMsg) : null));
+    }
+
+    function buildSummaryPanel(panel, edit, busy, msg, selected, refPanel, onEdit, onClose, onSelect, onSubmit, onRef, onCloseRef, onRetryRef, onJumpHost, refJumpMsg) {
       const head = h('div', { className: 'ldr-h' },
         '摘要版本 · ' + (panel.sessionId || ''),
         // 在抽屉里运行时由抽屉自己提供关闭入口，避免同一个位置出现两个「关闭」
@@ -307,9 +482,7 @@ window.__ModuleLoader__.load({
                 (sentCount == null ? '' : ' · 实际发送 ' + sentCount + ' 条事件') +
                 (v.sourceInherited ? ' · 来源范围继承自原摘要' : ''))
             : h('div', { className: 'ldr-dim' }, '来源：未知（旧记录缺字段）'),
-          v.summary
-            ? h('div', { style: { whiteSpace: 'pre-wrap', margin: '4px 0' } }, v.summary)
-            : h('div', { className: 'ldr-dim' }, '正文缺失'),
+          buildRefText(v, refPanel, onRef),
           v.originalSummary
             ? h('details', null,
                 h('summary', { className: 'ldr-dim' }, '原摘要'),
@@ -325,7 +498,12 @@ window.__ModuleLoader__.load({
         msg ? h('div', { className: msg.kind === 'ok' ? 'ldr-note' : 'ldr-err' }, msg.text) : null,
         // 版本正文在前：抽屉一打开就能读到摘要，而不是先看到空输入框
         h('div', { className: 'ldr-label', style: { marginBottom: 8 } }, '摘要版本（' + vs.length + '）'),
+        h('div', { className: 'ldr-dim', style: { marginBottom: 8 } },
+          '正文里的 [seq] / [seqA-seqB] 可以点：按需读取该段事件的元数据（seq/类型/时间/发送证据）。正文不返回——脱敏无法保证穷尽；核对原文请用下方的宿主会话跳转。'
+          + '虚线框的引用不可跳转，原因写在悬停提示里。'),
         items,
+        // 引用读取结果只有一份：点另一个引用就替换这块，不会在抽屉里堆一列事件表
+        buildRefPanel(refPanel, onCloseRef, onRetryRef, onJumpHost, refJumpMsg),
         selected
           ? h('div', { className: 'ldr-field', style: { marginTop: 14 } },
               h('div', { className: 'ldr-label' }, '人工修订（追加新版本到本地状态，不覆盖原摘要）'),
@@ -765,6 +943,16 @@ window.__ModuleLoader__.load({
   const [sumMsg, setSumMsg] = React.useState(null);
   // 选中的被修订版本：有 id 用 id，旧记录用 at
   const [sumSelected, setSumSelected] = React.useState(null);
+  // 引用跳转（B2）：{ sessionId, versionId, from, to, loading, data, error }
+  const [refPanel, setRefPanel] = React.useState(null);
+  // 「在宿主会话中打开核对」的结果提示：一段固定文案，不放正文
+  const [refJumpMsg, setRefJumpMsg] = React.useState(null);
+  // 引用读取代次：换引用 / 关抽屉 / 撤权后，迟到的 /refs 响应不得回写界面
+  const refGenRef = React.useRef(0);
+  // 摘要面板的判权轮询定时器：mini-react 不执行 cleanup，用 ref 收敛到最多一个
+  const sumPollRef = React.useRef(null);
+  // visibilitychange 监听器：同样因为 mini-react 不跑 cleanup，用 ref 先摘再挂
+  const sumVisibleRef = React.useRef(null);
   // 请求代次：切换会话/关闭面板后，过期响应不得回写
   const sumGenRef = React.useRef(0);
   // 面板快照：后台判权检查读它，避免闭包拿到旧 state
@@ -792,6 +980,9 @@ window.__ModuleLoader__.load({
 
       const openSummary = React.useCallback(async function (sid, opts) {
     const gen = ++sumGenRef.current;
+    // 版本集合可能变化（新修订 / 已撤权）：旧的引用读取结果与在途请求一律作废
+    refGenRef.current += 1;
+    setRefPanel(null);
     // 提交成功后要保留「已追加新版本」提示，所以重开面板时默认清消息、可显式保留
     if (!opts || opts.keepMsg !== true) setSumMsg(null);
     setSumEdit('');
@@ -812,6 +1003,105 @@ window.__ModuleLoader__.load({
     }
   }, []);
 
+  // 引用面板收起：代次 +1，在途的 /refs 响应一律丢弃
+  const closeRef = React.useCallback(function () {
+    refGenRef.current += 1;
+    setRefPanel(null);
+  }, []);
+
+  // 同一会话的撤权信号：清摘要正文、草稿、选中版本与引用面板，并作废两条链路在途响应。
+  // 无论是当前请求还是过期请求带回来的撤权结论，只要「还是同一个会话」，都必须执行——
+  // 过期响应里的撤权信号被丢掉，界面就会继续显示已撤权的内容。
+  const applySessionRevoke = React.useCallback(function (sid, payload) {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    sumGenRef.current += 1;
+    refGenRef.current += 1;
+    setSumEdit('');
+    setSumSelected(null);
+    setSumMsg({ kind: 'err', text: p.message || '当前会话不在允许范围内' });
+    setSumPanel({
+      sessionId: sid, loading: false, error: null,
+      data: {
+        ok: false, allowed: false, status: p.status || 'revoked',
+        message: p.message || '当前会话不在允许范围内，不返回内容。',
+      },
+      authStale: false, lastCheckAt: Date.now(),
+    });
+    setRefPanel(null);
+  }, []);
+
+  // 按需读取引用原文：每次点击都单独发一次请求，服务端读前/读后各判权一次。
+  // 客户端不缓存判定结论、不本地推测是否已撤权——只按返回的 allowed/status 显示。
+  const openRef = React.useCallback(async function (sid, v, seg) {
+    if (!sid || !v || !v.id || !seg) return;
+    const gen = ++refGenRef.current;
+    const base = { sessionId: sid, versionId: v.id, from: seg.from, to: seg.to };
+    setRefJumpMsg(null);
+    setRefPanel(Object.assign({}, base, { loading: true, data: null, error: null }));
+    let r = null;
+    try {
+      r = await fetch('/api/dsh-wangchao/refs', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(base),
+      });
+    } catch (e) {
+      if (gen === refGenRef.current) {
+        setRefPanel(Object.assign({}, base, {
+          loading: false, data: null, error: '请求失败：' + String(e && e.message ? e.message : e),
+        }));
+      }
+      return;
+    }
+    // 401/403 必须最先处理：不能先 await r.json()——响应体可能永远不结束，
+    // 那样「登录已失效」会一直挂在这里，界面继续显示旧内容。
+    if (r.status === 401 || r.status === 403) {
+      const cur = sumPanelRef.current;
+      if (cur && cur.sessionId) {
+        applySessionRevoke(cur.sessionId, {
+          allowed: false, status: 'auth-lost',
+          message: '登录状态已失效，内容已隐藏。请重新登录后刷新。',
+        });
+      }
+      return;
+    }
+    let j = null;
+    try { j = await r.json(); } catch { j = null; }
+    // 撤权先处理、且不受代次限制：过期的同会话响应同样要清正文。
+    const authLost = r.status === 401 || r.status === 403;
+    const revoked = j && typeof j === 'object' && j.allowed === false;
+    if (authLost || revoked) {
+      const p = sumPanelRef.current;
+      const stillSameSession = !!(p && p.sessionId && p.sessionId === sid);
+      if (stillSameSession) {
+        const payload = revoked
+          ? j
+          : { allowed: false, status: 'auth-lost', message: '登录状态已失效，内容已隐藏。请重新登录后刷新。' };
+        applySessionRevoke(sid, payload);
+        if (gen === refGenRef.current) {
+          setRefPanel(Object.assign({}, base, { loading: false, data: payload, error: null }));
+        }
+      }
+      return;   // 撤权/失效信号只用于清理，不再当成普通结果展示
+    }
+    if (gen !== refGenRef.current) return;   // 已换引用 / 关抽屉：迟到响应不得回写
+    if (!j || typeof j !== 'object') {
+      setRefPanel(Object.assign({}, base, { loading: false, data: null, error: '响应不完整（HTTP ' + r.status + '）' }));
+      return;
+    }
+    if (r.ok !== true) {
+      setRefPanel(Object.assign({}, base, { loading: false, data: null, error: j.error || ('HTTP ' + r.status) }));
+      return;
+    }
+    setRefPanel(Object.assign({}, base, { loading: false, data: j, error: null }));
+  }, [applySessionRevoke]);
+
+  // 当前面板是否仍然是这个会话：清正文只对「同会话」生效，
+  // 否则一个过期请求带回的 A 会话撤权会把用户正在看的 B 会话一起擦掉。
+  const isCurrentSumSession = function (sid) {
+    const p = sumPanelRef.current;
+    return !!(p && p.sessionId && p.sessionId === sid);
+  };
+
   // 后台判权检查：与「打开面板」分开。仍授权时保留草稿与选中；确认撤权才清空。
   // 检查失败（网络/判权异常）不改动界面，避免误擦用户正在写的内容。
   const checkSummaryAuth = React.useCallback(async function () {
@@ -823,23 +1113,20 @@ window.__ModuleLoader__.load({
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ sessionId: p.sessionId }),
       });
-      // 只有 HTTP 成功才尝试解析；401/500 一律按「无法确认」处理，不能当成已确认授权
+      // 401/403 一律按登录失效清正文，且不受代次限制：
+      // 即使这是一次过期的检查，只要还是同一个会话，「已失效」就必须立刻生效。
+      if (r.status === 401 || r.status === 403) {
+        // 登录失效是全局的：清掉当前正在显示的面板（不再用本次探测的会话 id）
+        const cur = sumPanelRef.current;
+        if (cur && cur.sessionId) applySessionRevoke(cur.sessionId, {
+          allowed: false, status: 'auth-lost',
+          message: '登录状态已失效，内容已隐藏。请重新登录后刷新。',
+        });
+        return;
+      }
+      // 其它 HTTP 错误：保留草稿，标记无法确认
       if (!r.ok) {
         if (gen !== sumGenRef.current) return;
-        if (r.status === 401 || r.status === 403) {
-          // 登录/认证失效：与撤权同等处理，清空已显示的内容
-          sumGenRef.current += 1;
-          setSumEdit('');
-          setSumSelected(null);
-          setSumPanel({
-            sessionId: p.sessionId, loading: false, error: null,
-            data: { ok: false, allowed: false, status: 'auth-lost', message: '登录状态已失效，内容已隐藏。请重新登录后刷新。' },
-            authStale: false,
-          });
-          setSumMsg({ kind: 'err', text: '登录状态已失效，内容已隐藏。' });
-          return;
-        }
-        // 其它 HTTP 错误：保留草稿，标记无法确认
         setSumPanel(function (prev) {
           if (!prev || prev.sessionId !== p.sessionId) return prev;
           return Object.assign({}, prev, { authStale: true, authStaleReason: 'HTTP ' + r.status });
@@ -848,6 +1135,14 @@ window.__ModuleLoader__.load({
       }
       let j = null;
       try { j = await r.json(); } catch { j = null; }
+      // 撤权信号先于代次判断：过期检查带回来的撤权结论同样要执行，
+      // 否则「最后一次轮询恰好过期」就会把撤权信息丢掉，界面继续显示旧内容。
+      if (j && typeof j === 'object' && j.allowed === false) {
+        // 只有「这次探测的会话 == 当前仍在显示的会话」才清；
+        // 过期探测（用户已切到别的会话）里的撤权结论不能拿来做跨会话误擦。
+        if (isCurrentSumSession(p.sessionId)) applySessionRevoke(p.sessionId, j);
+        return;
+      }
       if (gen !== sumGenRef.current) return;
       if (!j || typeof j !== 'object') {
         // 不完整的响应同样按「无法确认」处理
@@ -855,15 +1150,6 @@ window.__ModuleLoader__.load({
           if (!prev || prev.sessionId !== p.sessionId) return prev;
           return Object.assign({}, prev, { authStale: true, authStaleReason: '响应不完整' });
         });
-        return;
-      }
-      if (j.allowed === false) {
-        // 确认撤权：让当前代次立即失效，先前已发出的读取/提交响应不能再回写界面
-        sumGenRef.current += 1;
-        setSumEdit('');
-        setSumSelected(null);
-        setSumPanel({ sessionId: p.sessionId, loading: false, data: j, error: null, authStale: false, lastCheckAt: Date.now() });
-        setSumMsg({ kind: 'err', text: j.message || '当前会话不在允许范围内' });
         return;
       }
       if (j.allowed === true) {
@@ -886,21 +1172,45 @@ window.__ModuleLoader__.load({
         return Object.assign({}, prev, { authStale: true, authStaleReason: '网络或请求异常：' + String(e && e.message ? e.message : e) });
       });
     }
-  }, []);
+  }, [applySessionRevoke]);
 
-  // 面板打开期间定时检查；切回页面时立即检查一次
+  // 面板打开期间定时检查；切回页面时立即检查一次。
+  // mini-react 不执行 effect 的清理函数：不能只靠 return 的 cleanup 收定时器，
+  // 否则每开一次抽屉就多一个 15s 轮询（重复请求 /summaries）。这里用 ref 先清再建，
+  // 打开、切换、关闭三条路径都显式收敛到「最多一个定时器」。
+  const stopSumPoll = function () {
+    if (sumPollRef.current !== null) {
+      clearInterval(sumPollRef.current);
+      sumPollRef.current = null;
+    }
+  };
+  const stopSumVisible = function () {
+    if (sumVisibleRef.current !== null) {
+      document.removeEventListener('visibilitychange', sumVisibleRef.current);
+      sumVisibleRef.current = null;
+    }
+  };
   React.useEffect(function () {
-    if (!sumPanel || !sumPanel.sessionId) return;
+    if (!sumPanel || !sumPanel.sessionId) {
+      // 关闭面板：清掉后台判权用的快照与监听，否则关掉后仍会按旧面板继续判权/加监听
+      sumPanelRef.current = null;
+      stopSumPoll();
+      stopSumVisible();
+      return;
+    }
     sumPanelRef.current = sumPanel;
-    const timer = setInterval(checkSummaryAuth, 15000);
+    stopSumPoll();
+    stopSumVisible();
+    sumPollRef.current = setInterval(checkSummaryAuth, 15000);
     const onVisible = function () {
       if (document.visibilityState === 'visible') checkSummaryAuth();
     };
+    sumVisibleRef.current = onVisible;
     document.addEventListener('visibilitychange', onVisible);
     return function () {
       sumPanelRef.current = null;
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisible);
+      stopSumPoll();
+      stopSumVisible();
     };
   }, [sumPanel && sumPanel.sessionId, checkSummaryAuth]);
 
@@ -938,8 +1248,10 @@ window.__ModuleLoader__.load({
         setSumSelected(null);
         openSummary(sid, { keepMsg: true });
       } else if (j && j.status === 'revoked') {
-        // 明确撤权：让当前代次失效，再清空已显示的版本内容与编辑框
+        // 明确撤权：让当前代次失效，再清空已显示的版本内容与引用读取结果
         sumGenRef.current += 1;
+        refGenRef.current += 1;
+        setRefPanel(null);
         setSumEdit('');
         setSumSelected(null);
         setSumPanel({ sessionId: sid, loading: false, data: { ok: false, allowed: false, status: 'revoked', message: j.message || '当前会话不在允许范围内' }, error: null });
@@ -1545,8 +1857,10 @@ window.__ModuleLoader__.load({
       // 关闭抽屉：同时作废摘要面板代次。否则迟到的 /summaries 响应会把内容写回已关闭的面板。
       const closeDrawer = function () {
         sumGenRef.current += 1;
+        refGenRef.current += 1;
         setDrawer(null);
         setSumPanel(null);
+        setRefPanel(null);
         setSumMsg(null);
         setSumEdit('');
         setSumSelected(null);
@@ -1733,11 +2047,29 @@ window.__ModuleLoader__.load({
           : null,
         sumPanel
           ? buildSummaryPanel(
-              sumPanel, sumEdit, sumBusy, sumMsg, sumSelected,
+              sumPanel, sumEdit, sumBusy, sumMsg, sumSelected, refPanel,
               setSumEdit,
               null,
               setSumSelected,
-              function (sel) { submitEdit(sumPanel.sessionId, sel); })
+              function (sel) { submitEdit(sumPanel.sessionId, sel); },
+              // 引用点击：版本 + 起止 seq 原样交给 host 判边界，客户端不自己放宽条件
+              function (v, seg) { openRef(sumPanel.sessionId, v, seg); },
+              closeRef,
+              function () {
+                const p = refPanel;
+                if (!p) return;
+                const vs = (sumPanel.data && Array.isArray(sumPanel.data.versions)) ? sumPanel.data.versions : [];
+                const v = vs.filter(function (x) { return x && x.id === p.versionId; })[0] || null;
+                if (v) openRef(sumPanel.sessionId, v, { from: p.from, to: p.to });
+              },
+              // 宿主会话导航：主窗口有 uiWorkspace 才给按钮；独立窗口/缺服务时给固定说明
+              hostJumpTarget()
+                ? function (sid) {
+                    setRefJumpMsg(jumpToHostSession(sid)
+                      || '已切到宿主会话，请按 seq 与时间核对（宿主会遮罩已识别凭据）。');
+                  }
+                : null,
+              refJumpMsg)
           : null,
         sessionRow
           ? h('details', { className: 'ldr-json' },

@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { orphanTmpState } from './orphan-tmp.mjs';
 const validUsd = n => typeof n === 'number' && Number.isFinite(n) && n >= 0;
 const text = s => typeof s === 'string' && s.trim().length > 0;
 
@@ -24,7 +25,12 @@ export function openGovernance({ file, limitUsd, allowedPermissions = ['read'] }
     entries = data.entries;
     events = data.events ?? [];
   } catch (e) {
-    if (e?.code === 'ENOENT') { entries = []; events = []; }
+    if (e?.code === 'ENOENT') {
+      // 主文件缺失但临时文件仍在：上次结算/记账没走完 rename，账本不能当空账本重建
+      // （否则未结算费用从合计里消失，本地门禁与账单对不上）。
+      if (orphanTmpState(file) !== 'none') throw new Error('预算账本缺失但存在临时文件，需人工恢复（不得当作空账本）', {cause:e});
+      entries = []; events = [];
+    }
     else throw new Error('预算审计文件不可读，已暂停', {cause:e});
   }
   let closed = false;

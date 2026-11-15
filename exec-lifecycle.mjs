@@ -9,6 +9,7 @@
 // 记录是安全门禁的输入，不是「已停止」的证明。
 import fs from 'node:fs';
 import path from 'node:path';
+import { orphanTmpState } from './orphan-tmp.mjs';
 
 export const EXEC_LIFECYCLE_VERSION = 1;
 const validRecord = (rec) => !!rec && typeof rec === 'object' && rec.version === EXEC_LIFECYCLE_VERSION
@@ -61,7 +62,13 @@ export function createExecLifecycle({ file, now = () => Date.now(), logger = nul
     if (!file) return;
     let raw = null;
     try { raw = fs.readFileSync(file, 'utf8'); } catch (e) {
-      if (e?.code !== 'ENOENT') { corrupt = true; warn('生命周期记录不可读，按未确认处理：' + String(e?.code ?? e?.message ?? e)); }
+      if (e?.code !== 'ENOENT') { corrupt = true; warn('生命周期记录不可读，按未确认处理：' + String(e?.code ?? e?.message ?? e)); return; }
+      // 主文件缺失但临时文件仍在：上次落盘没走完 rename，活动执行可能还在，
+      // 不能当作「首次启动无记录」放行。
+      if (orphanTmpState(file) !== 'none') {
+        corrupt = true;
+        warn('生命周期记录缺失但存在临时文件，按未确认处理，需人工核对');
+      }
       return;
     }
     seenFile = true;
