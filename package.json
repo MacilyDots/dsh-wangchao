@@ -2,7 +2,7 @@
   "name": "dsh-wangchao",
   "version": "0.3.0",
   "type": "module",
-  "description": "DeepSeek Harness plugin: cross-session status from an allowlist, live streaming for active sessions, a read-only chief-of-staff advisor, plans and tasks, and a standalone full-screen view. Observe-only by default.",
+  "description": "DeepSeek Harness 跨会话总控插件（御书房）：白名单冷热采集、可追溯摘要与修订、只读首辅及受控任务调度（Fail-Closed）。",
   "author": "Macily Lei",
   "license": "MIT",
   "main": "./index.mjs",
