@@ -269,6 +269,11 @@ export function openTaskStore({ file, authorize, timeoutMs = DEFAULT_DISPATCH_TI
 
   return {
     totalCount() { if (poisoned) throw new Error('task store unavailable'); return tasks.length; },
+    // 仅供进程内都察院比对；不返回任务正文、来源、结果或会话标识。
+    auditSnapshot() {
+      if (poisoned) throw new Error('task store unavailable');
+      return tasks.map(({ id, status, startedAt }) => ({ id, status, startedAt }));
+    },
     runningCount() { if (poisoned) throw new Error('task store unavailable'); return runningCount(); },
     maxParallelTasks() { return maxParallelTasks; },
     async propose({ planId, sessionId, content, source, assignee, dependsOn }) {

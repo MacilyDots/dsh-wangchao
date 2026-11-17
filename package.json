@@ -1,6 +1,6 @@
 {
   "name": "dsh-wangchao",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "DeepSeek Harness 跨会话总控插件（御书房）：白名单冷热采集、可追溯摘要与修订、只读首辅及受控任务调度（Fail-Closed）。",
   "author": "Macily Lei",
@@ -40,6 +40,7 @@
     "exec-budget.mjs",
     "exec-gate-wiring.mjs",
     "writer-epoch-fencing.mjs",
+    "censorate.mjs",
     "orphan-tmp.mjs",
     "bin/check-locks.mjs",
     "bin/lock-doctor.mjs",

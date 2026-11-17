@@ -226,6 +226,16 @@ export function openExecBudget({ dir, limitUsd, pricePerTokenUsd }) {
   return {
     /** 只读价目副本，供门禁校验「估算是否覆盖输出上界成本」。 */
     price() { return { ...price }; },
+    /**
+     * 全量账本条目（供都察院做 attempt 上限 / fail-closed reserved 等全量不变量审计）。
+     * 只读磁盘、严格校验：读不出来抛错，绝不返回截断数据冒充全量。
+     * 与内存数据分开读取，避免把写盘失败时的内存回滚状态当成已持久化事实。
+     */
+    auditEntries() {
+      assertOwner();
+      const full = load(dir);
+      return full.entries.map((e) => ({ ...e }));
+    },
     snapshot() {
       return {
         limitUsd,

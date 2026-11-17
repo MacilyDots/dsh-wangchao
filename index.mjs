@@ -17,6 +17,7 @@ import { createExecLifecycle } from './exec-lifecycle.mjs';
 import { createLiveStreams } from './live-stream.mjs';
 import { orphanTmpState } from './orphan-tmp.mjs';
 import { createExecGateWiring, MAX_OUTPUT_TOKENS, MAX_TOTAL_TRIAL_REQUESTS } from './exec-gate-wiring.mjs';
+import { inspect as inspectCensorate } from './censorate.mjs';
 
 // 执行守卫的跨实例交接键。
 // 依据（2026-11-13 三探针实测，见 safety/harness/guard-owner-probe{,2,3}.mjs）：
@@ -1692,6 +1693,62 @@ export async function apply(ctx, config) {
   let pendingPoll = null;
   state.startedWithStalePending = fs.existsSync(pendingMark);
 
+  // ---- 都察院：纯本地只读巡检 → 内存报告（不写 state、不冻结、不阻断） ----
+  const runCensorate = () => {
+    const budgetConfigured = budgetLimitUsd > 0 && !!execGate;
+    let execSnapshot = null;
+    try { execSnapshot = execGate ? execGate.snapshot() : null; } catch {}
+    let govSnapshot = null;
+    try { govSnapshot = governance ? governance.snapshot() : null; } catch {}
+    let taskList = null;
+    try { taskList = workStore ? workStore.auditSnapshot() : null; } catch {}
+    const snapshot = {
+      guardGate: {
+        guard: { installed: execGuard.installed === true, scope: execGuard.scope ?? null },
+        policy: { ok: execPolicyRes.ok === true },
+        lifecycle: { blocked: (() => { try { return execRestartStatus().blocked === true; } catch { return true; } })() },
+        hasInFlight: (() => { try { return (execLifecycle.activeChildIds?.() ?? []).length > 0; } catch { return null; } })(),
+        tasks: taskList,
+        overreachCalls: (() => {
+          const p = lastExecPreflight;
+          if (!p || !Array.isArray(p.checks)) return null;
+          const chk = p.checks.find((c) => c?.check === 'denyNonWhitelisted');
+          return typeof chk?.pass === 'boolean' ? [{ allowed: chk.pass !== true }] : null;
+        })(),
+        budget: execSnapshot ? { ready: execSnapshot.ready === true, error: execSnapshot.error ?? null, failClosed: execSnapshot.fence?.failClosed ?? null, halted: execSnapshot.budget?.halted === true } : null,
+      },
+      summary: {
+        coverage: state.summaryCoverage ?? {}, unknown: state.summaryUnknown ?? {},
+        runs: state.summaryRuns ?? {}, sessions: state.sessions ?? {},
+      },
+      budgetTask: {
+        execBudgetEntries: (() => {
+          if (!budgetConfigured) return null;
+          try { return execBudget && typeof execBudget.auditEntries === 'function' ? execBudget.auditEntries() : null; }
+          catch { return null; }
+        })(),
+        execBudgetConfigured: budgetConfigured,
+        execBudgetFull: budgetConfigured,
+        governanceEntries: govSnapshot?.entries ?? null,
+        tasks: taskList,
+        writerEpoch: execSnapshot?.fence ? { failClosed: execSnapshot.fence.failClosed ?? null } : null,
+      },
+      admission: {
+        visible: Object.values(state.sessions ?? {}).filter((s) => s?.id && !s.revoked).map((s) => ({ id: s.id, allowed: true })),
+        revokedIds: Object.values(state.sessions ?? {}).filter((s) => s?.revoked && s?.id).map((s) => s.id),
+        chiefIds: [...(state.chiefs ?? []).map((c) => c?.sessionId), state.chief?.sessionId].filter(Boolean),
+        summaryKeys: Object.keys(state.summaries ?? {}),
+      },
+    };
+    const report = inspectCensorate(snapshot);
+    state.censorateReport = {
+      at: report.at, ok: report.ok, violations: report.violations, unknowns: report.unknowns,
+      byArea: { ...report.byArea }, findings: report.findings.map((f) => ({ code: f.code, severity: f.severity, detail: f.detail, ids: f.ids.slice(0, 8) })),
+    };
+    return report;
+  };
+  runCensorate();
+
   /** 规则收紧/放宽后按已保存的 cwd 重算 revoked；真正的读取仍以最新元数据为准 */
   const recomputeRevoked = (ruleSet) => {
     for (const s of Object.values(state.sessions)) {
@@ -2192,7 +2249,18 @@ export async function apply(ctx, config) {
     return task;
   };
   // 周期调度（interval），polling 标志防重叠
-  ctx.timer.interval(() => { poll('timer').catch(() => {}); }, pollIntervalMs);
+  // 都察院只读巡检随采集周期更新内存报告，异常只如实显示、不影响采集。
+  ctx.timer.interval(() => {
+    poll('timer').catch(() => {});
+    try { runCensorate(); }
+    catch (e) {
+      state.censorateReport = {
+        at: Date.now(), ok: false, violations: 0, unknowns: 1,
+        byArea: { guardGate: 0, summary: 0, budgetTask: 0, admission: 0 },
+        findings: [{ code: 'censorate.inspection-error', severity: 'unknown', detail: String(e?.message ?? e).slice(0, 200), ids: [] }],
+      };
+    }
+  }, pollIntervalMs);
 
   const status = (liveCwdMap) => {
     // 用当前规则重新判定，避免规则已收紧但界面仍展示旧记录
@@ -4330,6 +4398,8 @@ export async function apply(ctx, config) {
       projects: [...projects.values()].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)),
       // 采集诊断：allowed/synced/索引匹配/过滤原因，只给计数。面板「采集范围」栏据此解释 0 条。
       diagnostics: buildDiagnostics(stats, rows.length),
+      // 都察院只读巡检报告：只含 code/severity/计数，不含正文，不触发任何阻断。
+      censorate: { report: state.censorateReport ?? null },
     };
   };
 
@@ -5142,6 +5212,7 @@ export async function apply(ctx, config) {
     bumpSummaryVersion();
     const prev = {
       state: run.state, appliedAt: run.appliedAt, usage: run.usage, error: run.error,
+      summaryVersionId: run.summaryVersionId,
     };
     const hadCov = Object.prototype.hasOwnProperty.call(state.summaryCoverage ?? {}, id);
     const prevCov = hadCov ? state.summaryCoverage[id] : undefined;
@@ -5150,6 +5221,7 @@ export async function apply(ctx, config) {
       run.state = 'applied';
       run.appliedAt = Date.now();
       run.usage = outcome.usage ?? null;
+      run.summaryVersionId = outcome.summaryVersionId ?? null;
       mergeCoverage(id, run.records);
     } else {
       run.state = 'failed';
@@ -5162,6 +5234,7 @@ export async function apply(ctx, config) {
       run.appliedAt = prev.appliedAt;
       run.usage = prev.usage;
       run.error = prev.error;
+      run.summaryVersionId = prev.summaryVersionId;
       if (!state.summaryCoverage) state.summaryCoverage = {};
       if (hadCov) state.summaryCoverage[id] = prevCov;
       else delete state.summaryCoverage[id];
@@ -5983,7 +6056,7 @@ export async function apply(ctx, config) {
         result.sentSeqCount = sentSeqs.length;
         result.summaryVersionId = stored.id;
         // 只有「模型返回可用结果 + 写盘成功」才推进覆盖
-        const finA = finishRun(id, run, { applied: true, usage });
+        const finA = finishRun(id, run, { applied: true, usage, summaryVersionId: stored.id });
         if (!finA.ok) {
           // 摘要版本已在盘上，但「这次运行的状态 + 覆盖」没落盘：内存已回滚，
           // 不能把 coverage 当已持久化返回给调用方。

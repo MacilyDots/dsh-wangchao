@@ -91,6 +91,10 @@ npm run check:host-compat -- --host-root "<DSH安装目录>"
 
 宿主兼容探针使用临时 HOME、独立 profile 和假 provider，在真实宿主上检查 `agents`、`tools.guard`、`sessionController.observeEvent` 与 `subagents.startActivation`。退出码 0 表示通过，1 表示失败，2 表示找不到可验证的宿主或跳过。接口通过不代表覆盖 UI、真实模型或其他 DSH 版本；网络采样不能证明不存在所有外连。
 
+## 都察院（本地只读巡检）
+
+都察院（`censorate.mjs`）在插件加载与每轮采集后对四类不变量做纯本地检查：守卫与门禁、摘要覆盖、预算与任务、准入边界。它不调用模型、不读会话正文、不写状态文件；证据不足记 `unknown`（不等于通过），只有 `violation` 才计为异常。结果只通过 `/overview` 的 `censorate.report`（code/severity/计数，无正文）在御书房顶部显示告警条，**不冻结、不阻断任何操作**。精确 `seq` 深链与人工修订等原有能力不受影响。
+
 ## 许可
 
 MIT

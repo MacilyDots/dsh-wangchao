@@ -1969,6 +1969,18 @@ window.__ModuleLoader__.load({
             + '。请先修复或备份 state.json 后重启；在此期间规则修改会被拒绝，不会按配置文件基线继续采集。')
         : null;
 
+      // 都察院只读巡检：有违规显示告警（含违规码），正常时静默；不冻结、不提供恢复入口。
+      const censorate = ov.censorate || null;
+      const censorReport = censorate && censorate.report ? censorate.report : null;
+      const censorBanner = censorReport && censorReport.violations > 0
+        ? h('div', { className: 'ldr-warn', style: { lineHeight: 1.7 } },
+            h('div', null, '都察院巡检发现 ' + censorReport.violations + ' 项异常（仅供核对，不阻断操作）。'),
+            Array.isArray(censorReport.findings)
+              ? h('div', { className: 'ldr-dim' }, '违规码：' + censorReport.findings
+                  .filter(function (f) { return f && f.severity === 'violation'; })
+                  .map(function (f) { return f.code; }).slice(0, 12).join('、')) : null)
+        : null;
+
       const projectNames = (ov.projects || []).map(function (p) { return p.name; });
       const filteredRows = projectFilter
         ? rows.filter(function (s) { return (s.project || 'default') === projectFilter; })
@@ -2238,6 +2250,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ldr-layout' },
         h('div', { className: 'ldr-wrap ldr-main' },
           banner,
+          censorBanner,
           corruptBanner,
           observeBanner,
           topbar,
