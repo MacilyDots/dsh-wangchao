@@ -1,0 +1,96 @@
+{
+  "name": "dsh-wangchao",
+  "version": "0.5.0-alpha.4.1",
+  "private": false,
+  "type": "module",
+  "description": "DeepSeek Harness 跨会话总控插件（御书房）：白名单冷热采集、可追溯摘要与修订、只读首辅及受控任务调度（Fail-Closed）。",
+  "author": "Macily Lei",
+  "license": "MIT",
+  "homepage": "https://github.com/MacilyDots/dsh-wangchao#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MacilyDots/dsh-wangchao.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MacilyDots/dsh-wangchao/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "cross-session",
+    "observability",
+    "dashboard",
+    "live-stream",
+    "task-scheduler",
+    "standalone-window"
+  ],
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "authorize-tier.mjs",
+    "boundary.mjs",
+    "censorate-enforce.mjs",
+    "censorate.mjs",
+    "chief-analysis.mjs",
+    "chief-project-tools.mjs",
+    "client.js",
+    "cordis.patch.yml",
+    "deliver-dedupe.mjs",
+    "exec-admission.mjs",
+    "exec-budget.mjs",
+    "exec-gate-wiring.mjs",
+    "exec-lifecycle.mjs",
+    "exec-policy.mjs",
+    "governance.mjs",
+    "handoff.mjs",
+    "hanlin-digest.mjs",
+    "idea-capture.mjs",
+    "index.mjs",
+    "live-stream.mjs",
+    "mini-react.js",
+    "multi-task.mjs",
+    "orphan-tmp.mjs",
+    "plan-evidence.mjs",
+    "plan-tools.mjs",
+    "poll.mjs",
+    "project-facts.mjs",
+    "project-http-adapter.mjs",
+    "project-increments.mjs",
+    "project-projector.mjs",
+    "project-routes.mjs",
+    "project-store.mjs",
+    "real-model-readiness.mjs",
+    "recovery-pack.mjs",
+    "report-bar.mjs",
+    "research-search.mjs",
+    "role-stream.mjs",
+    "roles.mjs",
+    "sanitize.mjs",
+    "session-lineage.mjs",
+    "standalone.html",
+    "state.mjs",
+    "summary-verify.mjs",
+    "task-store.mjs",
+    "tsconfig.json",
+    "types.d.ts",
+    "writer-epoch-fencing.mjs",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.en.md",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": ["ES2023"]
+  },
+  "include": ["types.d.ts", "boundary.mjs", "state.mjs", "poll.mjs", "checks/**/*.mjs"],
+  "exclude": ["node_modules"]
+}

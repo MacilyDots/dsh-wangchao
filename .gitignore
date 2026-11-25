@@ -1,0 +1,38 @@
+# dsh-wangchao 独立仓库
+#
+# 本目录独立发布，避免把工作区快照与临时文件混入发布包。
+
+# 手工备份（历史用 index.mjs.bak-* 代替版本控制，现已由 git 取代）
+*.bak*
+*.bak-sync-*
+# 手工回滚副本的其它写法
+*-backup-*
+*.orig
+
+# 依赖与构建产物
+node_modules/
+dist/
+*.tgz
+
+# 截图/渲染缓存（体积大，且写盘会触发宿主 watcher）
+shots/
+*.png
+*.webm
+
+# 日志与临时导出
+*.log
+*.tmp
+*.pid
+tmp/
+temp/
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 测试运行生成的临时夹具
+*-fixtures/
+fence-fixtures/
+

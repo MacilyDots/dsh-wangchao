@@ -1,0 +1,14 @@
+# 行尾统一为 LF。
+#
+# 原因：本仓库有代码指纹 checks（computeDiskFingerprint），它按文件字节算哈希。
+# core.autocrlf=true 且无本文件时，git 在 add/commit 期间会把工作区的 LF 改写成
+# CRLF（实测 index.mjs 从 0 个 CRLF 变成 6096 个），指纹随之漂移，导致
+# assertHostCodeFresh 在每次提交后都误报 ERR_STALE_HOST_CODE。
+* text=auto eol=lf
+
+# 二进制文件不做文本转换
+*.png binary
+*.jpg binary
+*.webm binary
+*.tgz binary
+*.ico binary

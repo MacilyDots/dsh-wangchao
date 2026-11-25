@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>御书房</title>
+<style>
+  /* 只解除侧栏的窄宽度限制：让 client.js 的 .ldr-layout 占满独立窗口。
+     其余样式全部来自 client.js 自身注入的 CSS，不改动其术语与结构。
+     底色跟随系统深浅（client.js 里的令牌同样按 prefers-color-scheme 切换），
+     这里只负责 html/body 与启动错误条，避免深色下露出一圈白底。 */
+  html { color-scheme: light dark; }
+  html, body {
+    height: 100%; margin: 0;
+    background: light-dark(#f6f2ea, #151311);
+    color: light-dark(#231f1b, #ece6dd);
+  }
+  #root { height: 100%; }
+  .ldr-layout { height: 100%; }
+  #root > .ldr-layout > .ldr-wrap { height: 100%; box-sizing: border-box; }
+  #boot-error {
+    position: fixed; inset: 0; display: none; padding: 24px;
+    font: 13px/1.6 ui-sans-serif, system-ui, sans-serif; white-space: pre-wrap;
+    color: light-dark(#7a2f28, #f0b8ae);
+    background: light-dark(#fdf4f2, #33241f);
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="boot-error"></div>
+<script src="/api/dsh-wangchao/ui/mini-react.js"></script>
+<script>
+window.__wcStandalone = true;
+window.__wcDefaultView = 'war';
+(function () {
+  var registrations = [];
+  window.__ModuleLoader__ = {
+    load: function (def) {
+      if (!def || def.id !== 'dsh-wangchao') return;
+      var req = function (name) {
+        if (name === 'react') return window.MiniReact;
+        throw new Error('独立页面未提供客户端模块：' + name);
+      };
+      window.__wcPlugin = def.factory(req);
+    },
+  };
+  var slots = {
+    inject: function (key, fn) { try { fn(); } catch (e) { console.warn('[slots.inject]', key, e); } return function () {}; },
+    register: function (def, Comp) { registrations.push({ def: def, Comp: Comp }); return function () {}; },
+    entries: function () { return []; },
+  };
+  var sessions = {
+    list: {
+      getSnapshot: function () { return { ids: [], byId: {}, phase: 'ready', projectionsBySession: {} }; },
+      subscribe: function () { return function () {}; },
+    },
+  };
+  var ctx = {
+    get: function (name) {
+      if (name === 'slots') return slots;
+      if (name === 'sessions') return sessions;
+      return null;
+    },
+    effect: function (fn) { try { fn(); } catch (e) { console.warn('[ctx.effect]', e); } return function () {}; },
+    on: function () { return function () {}; },
+    inject: function (deps, cb) { try { cb(ctx); } catch (e) { console.warn('[ctx.inject]', e); } return function () {}; },
+    plugin: function () { return {}; },
+  };
+  window.__wcMount = function () {
+    try {
+      var plugin = window.__wcPlugin;
+      if (!plugin) throw new Error('client.js 未加载完成');
+      plugin.apply(ctx);
+      var main = null;
+      for (var i = 0; i < registrations.length; i++) {
+        if (registrations[i].def && registrations[i].def.name === 'main') { main = registrations[i]; break; }
+      }
+      if (!main) throw new Error('御书房主面板未注册');
+      window.MiniReact.render(window.MiniReact.createElement(main.Comp), document.getElementById('root'));
+    } catch (e) {
+      var box = document.getElementById('boot-error');
+      box.style.display = 'block';
+      box.textContent = '御书房独立页面启动失败：\n' + (e && e.stack ? e.stack : e);
+      throw e;
+    }
+  };
+})();
+</script>
+<script src="/api/dsh-wangchao/ui/client.js"></script>
+<script>
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { window.__wcMount(); });
+  else window.__wcMount();
+</script>
+</body>
+</html>
