@@ -17,6 +17,7 @@ dist/
 # 截图/渲染缓存（体积大，且写盘会触发宿主 watcher）
 shots/
 *.png
+!promo-screenshots/*.png
 *.webm
 
 # 日志与临时导出
