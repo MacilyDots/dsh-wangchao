@@ -138,7 +138,7 @@
 | 项 | 结果 |
 |---|---|
 | `checks/all.mjs` | 6/6 组、45 断言、0 失败；`bundleHash=620083ac647ef3b1` |
-| 全量离线（66 文件） | **409 tests / 408 pass / 0 fail / 1 skipped** |
+| 全量离线（67 文件） | **409 tests / 408 pass / 0 fail / 1 skipped** |
 | 定向 | F-01 24 项、F-02 10 项 + 35 项 fence 单测、F-03 6 项、UI 18 项，全部通过 |
 | 关联回归 | `wiring`、`fence-integration`、`rrp-mvp-01`、`project-http-routes`、`project-store`、`project-facts`、`chief-project-tools`、`config-effective`、`warroom`、`standalone-refs` 全部通过 |
 

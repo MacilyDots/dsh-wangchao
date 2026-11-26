@@ -127,6 +127,15 @@ test('稀疏保存不清除继承的排除规则；清空排除需显式确认�
   assert.equal(noConfirm.body.code, 'confirm-required');
   assert.deepEqual(f.state().rulesOverride.excludeSessions, undefined);
 
+  // 覆盖后再清空：仍必须确认（F-05 服务端侧回归）
+  const overridden = await f.call(RULES, { excludeSessions: ['s-temp'], baseRevision: get.body.revision });
+  assert.equal(overridden.status, 200, overridden.body.error);
+  assert.deepEqual(f.state().rulesOverride.excludeSessions, ['s-temp']);
+  get = await f.call(RULES, undefined, 'GET');
+  const clearAfterOverride = await f.call(RULES, { excludeSessions: [], baseRevision: get.body.revision });
+  assert.equal(clearAfterOverride.status, 400, '覆盖后清空也必须确认');
+  assert.equal(clearAfterOverride.body.code, 'confirm-required');
+
   // 显式确认清空：写入显式空集
   const confirmed = await f.call(RULES, { excludeSessions: [], confirmClearExclude: true, baseRevision: get.body.revision });
   assert.equal(confirmed.status, 200, confirmed.body.error);

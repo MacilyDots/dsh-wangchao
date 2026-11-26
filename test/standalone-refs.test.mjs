@@ -209,6 +209,7 @@ const jsonResponse = (body, status = 200) => ({
   json: async () => body,
 });
 
+let rulesExplicit = ['allowCwds', 'excludeCwds'];
 globalThis.fetch = async (url, init) => {
   const method = (init && init.method) || 'GET';
   let body = null;
@@ -249,7 +250,7 @@ globalThis.fetch = async (url, init) => {
     return jsonResponse({
       rules: { allowCwds: ['B:/allowed'], excludeCwds: ['B:/secret'], allowSessions: [], excludeSessions: [] },
       config: { allowCwds: ['B:/allowed'], excludeCwds: ['B:/secret'], allowSessions: [], excludeSessions: [] },
-      source: 'override', explicitFields: ['allowCwds'], revision: 0, stateCorrupt: false,
+      source: 'override', explicitFields: rulesExplicit.slice(), revision: 0, stateCorrupt: false,
     });
   }
   if (url === '/api/dsh-wangchao/work') {
@@ -673,9 +674,21 @@ await t('采集范围：稀疏保存、来源标注与清除排除规则确认',
   assert.match(textOf(), /请先勾选/);
   assert.equal(requests.slice(before2).filter((r) => r.url === '/api/dsh-wangchao/rules' && r.method === 'POST').length, 0, '未确认不得提交清空排除');
 
-  // 勾选确认后允许提交，并带 confirmClearExclude
+  // 勾选后再取消：仍不得提交（取消确认）
   const cb = all().find((n) => n.tagName === 'INPUT' && n.getAttribute('type') === 'checkbox' && n._listeners.has('input'));
   assert.ok(cb, '缺少确认复选框');
+  cb.checked = true;
+  fire(cb);
+  await settle();
+  cb.checked = false;
+  fire(cb);
+  await settle();
+  const beforeCancel = requests.length;
+  byText('保存规则（仅提交已编辑字段）')[0].click();
+  await settle(8);
+  assert.equal(requests.slice(beforeCancel).filter((r) => r.url === '/api/dsh-wangchao/rules' && r.method === 'POST').length, 0, '取消确认后仍不得提交');
+
+  // 重新勾选确认后允许提交，并带 confirmClearExclude
   cb.checked = true;
   fire(cb);
   await settle();
@@ -686,6 +699,17 @@ await t('采集范围：稀疏保存、来源标注与清除排除规则确认',
   assert.equal(posts3.length, 1);
   assert.deepEqual(posts3[0].body.excludeCwds, []);
   assert.equal(posts3[0].body.confirmClearExclude, true);
+
+  // 单字段恢复继承：只提交该字段 null
+  const restores = byText('恢复为继承配置');
+  assert.ok(restores.length >= 2, '两个显式字段都应有恢复继承按钮');
+  const before4 = requests.length;
+  restores[1].click();
+  await settle(12);
+  const posts4 = requests.slice(before4).filter((r) => r.url === '/api/dsh-wangchao/rules' && r.method === 'POST');
+  assert.equal(posts4.length, 1, '恢复继承应提交一次');
+  assert.deepEqual(Object.keys(posts4[0].body).sort(), ['baseRevision', 'excludeCwds']);
+  assert.equal(posts4[0].body.excludeCwds, null);
   assert.deepEqual(errors, []);
 });
 

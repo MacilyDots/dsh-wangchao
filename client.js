@@ -909,7 +909,9 @@ window.__ModuleLoader__.load({
         return Array.isArray(rs.rules && rs.rules[k]) && rs.rules[k].length === 0;
       });
       const inheritedExcludes = ['excludeCwds', 'excludeSessions'].filter(function (k) {
-        return explicitFields.indexOf(k) < 0 && Array.isArray(baseRules[k]) && baseRules[k].length > 0;
+        // 与服务端口径一致：只要基线该维度非空、保存的是空数组，就必须确认；
+        // 不因该字段此前已被面板覆盖过而跳过（F-05：覆盖后再次清空也必须能确认）。
+        return Array.isArray(baseRules[k]) && baseRules[k].length > 0;
       });
       const field = function (key, label, hint) {
         const fromOverride = rs.source === 'override' && explicitFields.indexOf(key) >= 0;
@@ -3960,12 +3962,11 @@ window.__ModuleLoader__.load({
           setRulesErr('没有修改：只提交你实际编辑过的字段；未编辑字段保持原有语义。');
           return;
         }
-        // 空排除字段是否在清除配置基线的拒绝项：是则要求显式确认。
-        const explicit = rulesState && Array.isArray(rulesState.explicitFields) ? rulesState.explicitFields : [];
+        // 空排除字段是否在清除配置基线的拒绝项：是则要求显式确认（与服务端同一口径）。
         const base = rulesState && rulesState.config && typeof rulesState.config === 'object' ? rulesState.config : {};
         const risky = ['excludeCwds', 'excludeSessions'].filter(function (k) {
           return rulesDirty[k] === true && body[k] && body[k].length === 0
-            && explicit.indexOf(k) < 0 && Array.isArray(base[k]) && base[k].length > 0;
+            && Array.isArray(base[k]) && base[k].length > 0;
         });
         if (risky.length > 0 && !clearExcludeAck) {
           setRulesErr('清空 ' + risky.join(' / ') + ' 会撤销配置基线中的拒绝规则并扩大采集范围：请先勾选「我明确要清除继承的排除规则」。');
