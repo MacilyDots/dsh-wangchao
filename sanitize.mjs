@@ -16,6 +16,8 @@ const PATTERNS = [
   [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 [REDACTED]'],
   // 常见键值：api_key / apiKey / api-key / access_token / token / secret / password / key / cred
   [/\b(api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|client[_-]?secret|credential|secret|password|passwd|token|key|sig|signature)\b(\s*[:=]\s*)("?)[^\s"'&,;]{4,}/gi, '$1$2$3[REDACTED]'],
+  // URL userinfo（https://user:password@host）：口令位必须遮罩，不能只处理 query。
+  [/\b(https?:\/\/[^\s\/:@]+:)([^\s\/@]+)(@)/gi, '$1[REDACTED]$3'],
   // URL query/片段里的 creds
   [/([?&](?:api[_-]?key|access[_-]?token|token|key|secret|sig|signature)=)[^\s&"']+/gi, '$1[REDACTED]'],
   // 键名后空格 + 长值的写法（如 "invalid api_key VALUE"）；只限明确凭据词，避免误伤普通文本

@@ -31,6 +31,7 @@ import { buildAnalysisContext, createAnalysisState, beginAnalysis, completeAnaly
 import { createProjectStore } from './project-store.mjs';
 import { createProjectHttpAdapter } from './project-http-adapter.mjs';
 import { buildProjectRoutes } from './project-routes.mjs';
+import { readSessionLineage } from './session-lineage.mjs';
 // 诊断/错误脱敏：结构化投影 + 模式脱敏；审计与失败原因一律经此处理（GAP-MODEL G3-2）
 import { safeDiagnostic, scrubText, safeErrorOf } from './sanitize.mjs';
 // 真实模型准入：只做判定与五态区分，不读取凭据值、不自动触发商业调用
@@ -68,7 +69,7 @@ export {
   __test_hooks__,
 } from './boundary.mjs';
 import { orphanTmpState } from './orphan-tmp.mjs';
-import { createStateDomain, RULE_KEYS, normalizeRuleSet, saveState } from './state.mjs';
+import { createStateDomain, RULE_KEYS, RULE_FORMAT_EXPLICIT, normalizeRuleSet, mergeRules, saveState } from './state.mjs';
 import { createExecGateWiring, MAX_OUTPUT_TOKENS, MAX_TOTAL_TRIAL_REQUESTS } from './exec-gate-wiring.mjs';
 
 // 执行守卫的跨实例交接键。
@@ -824,6 +825,8 @@ export async function apply(ctx, config) {
   const agentsCreate = () => (agentsService && typeof agentsService.create === 'function' ? agentsService : null);
   const agentsResume = () => (agentsService && typeof agentsService.resume === 'function' ? agentsService : null);
   // 状态与规则由 state 域持有（state.mjs）；apply 只保留 rules 的当前值。
+  // baseRules 是配置文件基线：保存规则时只在覆盖层上合并显式字段，不再把当时生效的基线固化进 override。
+  const baseRules = stateDom.baseRules;
   let rules = stateDom.initialRules;
   // P3 第二刀拆分后，poll 域（poll.mjs）要读写同一份可变运行时状态。
   // 跨模块不能各拿一个裸 let：poll.mjs 里给「解构出的绑定」赋值会抛
@@ -1690,6 +1693,15 @@ export async function apply(ctx, config) {
       try {
         if (execConfigError) throw new Error(execConfigError);
         if (!Number.isFinite(budgetSingleUsd)) throw new Error('budgetSingleUsd 必须是正有限数');
+        // 非法配置不再静默回落到默认 2：宁可门禁建立失败（fail closed），也不能让配置形同虚设。
+        if (cfg.maxAttemptsPerChild !== undefined
+          && !(Number.isSafeInteger(Number(cfg.maxAttemptsPerChild)) && Number(cfg.maxAttemptsPerChild) > 0)) {
+          throw new Error('maxAttemptsPerChild 必须是正整数');
+        }
+        if (cfg.maxTotalTrialRequests !== undefined
+          && !(Number.isFinite(Number(cfg.maxTotalTrialRequests)) && Number(cfg.maxTotalTrialRequests) >= 1)) {
+          throw new Error('maxTotalTrialRequests 必须是 ≥1 的有限数');
+        }
         // 测试注入：仅隔离假模型测试可模拟「门禁注册失败」，用于验证失败必须拒发。
         execGate = createExecGateWiring({
           stateDir,
@@ -1711,9 +1723,9 @@ export async function apply(ctx, config) {
             }
             return null;
           },
-          // 角色会话归属：仅首辅当前会话与翰林院摘要标识；供真实模型门禁核验身份（不接受请求体伪造）
+          // 角色会话归属：仅隔离试验时把首辅纳入执行预算门禁；常规只读对话复用宿主默认模型，不套用执行子 Agent 的 512 输出硬上限。
           managedSession: (sid) => {
-            if (sid && state.chief?.sessionId === sid) return { role: 'chief' };
+            if (cfg.isolatedTestExecution === true && sid && state.chief?.sessionId === sid) return { role: 'chief' };
             if (sid === HANLIN_SESSION_ID) return { role: 'hanlin' };
             return null;
           },
@@ -1983,7 +1995,7 @@ export async function apply(ctx, config) {
    * 一旦把落盘改成异步（await），两个并发请求就可能都看到旧 revision 后各自写盘，
    * 那时必须补进程内互斥或文件锁。
    */
-  const saveRules = (next, baseRevision) => {
+  const saveRules = (next, baseRevision, opts = {}) => {
     // 状态文件损坏时拒绝写入：否则会用空状态覆盖原文件，把可恢复的数据抹掉
     if (stateLoadIssue) return { ok: false, error: '状态文件不可读，拒绝写入（避免覆盖待恢复的状态）：' + stateLoadIssue };
     const currentRevision = state.rulesRevision ?? 0;
@@ -1994,9 +2006,38 @@ export async function apply(ctx, config) {
         error: `规则已被其他窗口修改（当前修订号 ${currentRevision}，你基于 ${baseRevision}），请重新读取后再保存`,
       };
     }
-    const normalized = normalizeRuleSet(next);
+    // 只接受调用方显式给出的字段：缺失 = 保持原状；null = 显式恢复该字段继承配置基线。
+    /** @type {any} */
+    const fields = {};
+    /** @type {string[]} */
+    const deletions = [];
+    for (const k of RULE_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(next ?? {}, k)) continue;
+      if (next[k] === null) { deletions.push(k); continue; }
+      if (Array.isArray(next[k])) fields[k] = normalizeRuleSet({ [k]: next[k] })[k];
+    }
+    if (Object.keys(fields).length === 0 && deletions.length === 0) {
+      return { ok: false, error: '没有可更新的规则字段（只接受 ' + RULE_KEYS.join(' / ') + '），null 表示恢复该字段继承配置' };
+    }
+    // 清除继承的拒绝规则会扩大采集范围：必须显式确认，不能由普通保存、空白输入或默认值触发。
+    for (const k of ['excludeCwds', 'excludeSessions']) {
+      if (Object.prototype.hasOwnProperty.call(fields, k) && fields[k].length === 0
+          && baseRules[k].length > 0 && opts.confirmClearExclude !== true) {
+        return {
+          ok: false, code: 'confirm-required', field: k,
+          error: `清空 ${k} 会撤销配置基线中的拒绝规则并扩大采集范围；如确属本意，请带 confirmClearExclude:true 重新提交`,
+        };
+      }
+    }
+    const prevOverride = state.rulesOverride ? { ...state.rulesOverride } : null;
+    /** @type {any} */
+    const nextOverride = { ...(prevOverride ?? {}), ...fields };
+    for (const k of deletions) delete nextOverride[k];
+    const hasOverride = Object.keys(nextOverride).length > 0;
+    const normalized = mergeRules(baseRules, hasOverride ? nextOverride : null, RULE_FORMAT_EXPLICIT);
     const prev = {
-      override: state.rulesOverride, updatedAt: state.rulesUpdatedAt,
+      override: state.rulesOverride, format: state.rulesOverrideFormat,
+      updatedAt: state.rulesUpdatedAt,
       epoch: state.rulesEpoch, revision: state.rulesRevision, rules,
     };
     // 规则、epoch 与 revision 作为一次状态提交：先算完整下一状态，再一次原子写盘；
@@ -2009,7 +2050,15 @@ export async function apply(ctx, config) {
       || shrank(prev.rules.allowCwds, normalized.allowCwds);
     const nextEpoch = (state.rulesEpoch ?? 0) + (tightened ? 1 : 0);
     const nextRevision = currentRevision + 1;
-    state.rulesOverride = normalized;
+    if (hasOverride) {
+      state.rulesOverride = nextOverride;
+      // 显式格式标记：从这一刻起「字段存在即生效」，空数组是用户主动清空的授权集合。
+      state.rulesOverrideFormat = RULE_FORMAT_EXPLICIT;
+    } else {
+      // 所有字段都恢复继承：等价于没有覆盖，删除标记而不是留一个空对象冒充 override。
+      delete state.rulesOverride;
+      delete state.rulesOverrideFormat;
+    }
     state.rulesUpdatedAt = Date.now();
     state.rulesEpoch = nextEpoch;
     state.rulesRevision = nextRevision;
@@ -2017,6 +2066,8 @@ export async function apply(ctx, config) {
     const w = persistState();
     if (!w.ok) {
       state.rulesOverride = prev.override;
+      if (prev.format === undefined) delete state.rulesOverrideFormat;
+      else state.rulesOverrideFormat = prev.format;
       state.rulesUpdatedAt = prev.updatedAt;
       state.rulesEpoch = prev.epoch;
       state.rulesRevision = prev.revision;
@@ -2028,7 +2079,7 @@ export async function apply(ctx, config) {
     // 规则变化后，在途翰林院摘要必须按新规则重新判权：直接中止，避免用旧授权跑完
     try { abortHanlinDigestsHook?.('采集规则变化，在途翰林院摘要已中止'); } catch {}
     try { liveRuntime.streams?.reconcile(true); } catch { liveRuntime.streams?.dispose(); liveRuntime.streams = null; }
-    return { ok: true, rules: normalized, source: 'override', epoch: nextEpoch, revision: nextRevision };
+    return { ok: true, rules: normalized, source: hasOverride ? 'override' : 'config', epoch: nextEpoch, revision: nextRevision };
   };
 
   /** 恢复配置文件基线：删除 override（同样先写盘成功才生效） */
@@ -2043,7 +2094,8 @@ export async function apply(ctx, config) {
       };
     }
     const prev = {
-      override: state.rulesOverride, updatedAt: state.rulesUpdatedAt,
+      override: state.rulesOverride, format: state.rulesOverrideFormat,
+      updatedAt: state.rulesUpdatedAt,
       epoch: state.rulesEpoch, revision: state.rulesRevision, rules,
     };
     // 恢复基线也是一次规则变化：epoch、revision 与规则同一次写盘，避免「重启后收紧历史丢失」
@@ -2051,6 +2103,7 @@ export async function apply(ctx, config) {
     const nextEpoch = (state.rulesEpoch ?? 0) + 1;
     const nextRevision = currentRevision + 1;
     delete state.rulesOverride;
+    delete state.rulesOverrideFormat;
     delete state.rulesUpdatedAt;
     state.rulesEpoch = nextEpoch;
     state.rulesRevision = nextRevision;
@@ -2058,6 +2111,8 @@ export async function apply(ctx, config) {
     const w = persistState();
     if (!w.ok) {
       state.rulesOverride = prev.override;
+      if (prev.format === undefined) delete state.rulesOverrideFormat;
+      else state.rulesOverrideFormat = prev.format;
       state.rulesUpdatedAt = prev.updatedAt;
       state.rulesEpoch = prev.epoch;
       state.rulesRevision = prev.revision;
@@ -2075,6 +2130,8 @@ export async function apply(ctx, config) {
   const pollDom = createPollDomain({
     probeSessionIndex,
     persistenceService,
+    // 规则按值传的是创建时的快照，面板保存后不会更新；轮询判权必须读当前值。
+    rulesNow: () => rules,
     rules,
     liveRuntime,
     isChiefSession,
@@ -2273,9 +2330,24 @@ export async function apply(ctx, config) {
     rulesNow: () => ({ rules, revision: state.rulesRevision ?? 0 }),
     createStore: createProjectStore,
     stateIssue: () => stateLoadIssue,
-    getSearchContext: () => ({
+    getSearchContext: (canAccessSession) => ({
       sessions: Object.values(state.sessions ?? {}).map((s) => ({ id: s?.id, title: s?.title })).filter((s) => s.id),
       summaries: state.summaries ?? {},
+      // B5 只读血缘：消费 session-inherit 的 history.json，任一端未授权即整条隐藏（fail-closed）。
+      // 文件缺失/损坏由模块自身降级为空边，不影响检索与恢复包。
+      lineages: (() => {
+        try {
+          const historyFile = typeof cfg.sessionHistoryFile === 'string' && cfg.sessionHistoryFile
+            ? cfg.sessionHistoryFile
+            : path.join(dshHome, 'session-inherit', 'history.json');
+          const access = typeof canAccessSession === 'function' ? canAccessSession : (sid) => {
+            const rec = state.sessions?.[sid];
+            if (!rec?.cwd) return false;
+            try { return isAllowed(decideAccess(rules, sid, rec.cwd)); } catch { return false; }
+          };
+          return readSessionLineage({ historyFile, canAccessSession: access }).edges;
+        } catch { return []; }
+      })(),
     }),
     makeVerifySummary: () => createSummaryVerifier({
       summaries: state.summaries ?? {},
@@ -2624,6 +2696,13 @@ export async function apply(ctx, config) {
               rules,
               source: state.rulesOverride ? 'override' : 'config',
               config: normalizeRuleSet(cfgRules),
+              // 1=旧格式（空数组当未设置，已迁移）；2=显式格式（字段存在即生效）
+              format: Number(state.rulesOverrideFormat) === 2 ? 2 : 1,
+              migratedAt: state.rulesMigratedAt ?? null,
+              // 当前显式设定的字段；空数组字段也在其中，表示明确不授权
+              explicitFields: state.rulesOverride
+                ? RULE_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(state.rulesOverride, k))
+                : [],
               updatedAt: state.rulesUpdatedAt ?? null,
               // 保存冲突检测用的独立修订号：每次保存 +1，与 rulesEpoch（只在收紧时 +1）不同
               revision: state.rulesRevision ?? 0,
@@ -2653,11 +2732,14 @@ export async function apply(ctx, config) {
             return json(r, r.ok ? 200 : (r.conflict ? 409 : 500));
           }
           const patch = {};
-          for (const k of RULE_KEYS) if (Array.isArray(body[k])) patch[k] = body[k];
-          if (Object.keys(patch).length === 0) {
-            return json({ ok: false, error: '没有可更新的规则字段（只接受 ' + RULE_KEYS.join(' / ') + '）' }, 400);
+          for (const k of RULE_KEYS) {
+            if (Object.prototype.hasOwnProperty.call(body, k) && (Array.isArray(body[k]) || body[k] === null)) patch[k] = body[k];
           }
-          const r = saveRules({ ...rules, ...patch }, baseRevision);
+          if (Object.keys(patch).length === 0) {
+            return json({ ok: false, error: '没有可更新的规则字段（只接受 ' + RULE_KEYS.join(' / ') + '，null 表示恢复继承配置）' }, 400);
+          }
+          const r = saveRules(patch, baseRevision, { confirmClearExclude: body.confirmClearExclude === true });
+          if (!r.ok && r.code === 'confirm-required') return json(r, 400);
           if (r.ok) {
             const sid = state.chief?.sessionId;
             // 收紧一旦生效，当前首辅立即失去放行依据：主动中止在途分析（fail-closed，不写成功缓存）
@@ -3252,12 +3334,24 @@ export async function apply(ctx, config) {
             return json(r);
           }
           if (action === 'fresh') {
+            // 「新开议事」必须是新会话：旧实现 release 后再 summon，会 resume 同一个 sessionId，
+            // 结果历史消息仍在，fresh 名不副实。这里释放后清空当前首辅登记（旧会话进 chiefs 历史），
+            // 下一次召见必然走 chiefCreate。
             if (state.chief?.sessionId) {
+              const old = state.chief.sessionId;
               const rel = await chiefRelease();
-              if (!rel?.ok) return json(rel, 409);
+              if (!rel?.ok) return json({ ...rel, fresh: false, error: rel?.error || '旧首辅未能释放，无法新开议事' }, 409);
+              if (chiefHandle) { try { await chiefHandle.dispose?.(); } catch {} }
+              setChiefRuntime(null);
+              const h = (state.chiefs ?? []).find((x) => x.sessionId === old);
+              if (h) { if (!h.closedAt) h.closedAt = Date.now(); }
+              else (state.chiefs ??= []).push({ sessionId: old, cwd: state.chief?.cwd ?? null, createdAt: Date.now(), termId: state.currentTerm?.id ?? null, closedAt: Date.now() });
+              state.chief = null;
+              const wFresh = persistState();
+              if (!wFresh.ok) return json({ ok: false, fresh: false, error: '新开议事时清理旧首辅登记失败：' + (wFresh.error || '未知原因') }, 500);
             }
             const r = await chiefSummon();
-            return json(r?.ok ? { ...r, fresh: true, summonedAtSeq: -1 } : r);
+            return json(r?.ok ? { ...r, fresh: true, summonedAtSeq: -1, newSessionId: r.sessionId } : r);
           }
           if (action === 'release') return json(await chiefRelease());
           return json({ ok: false, error: '未知 action：只支持 summon / fresh / release' }, 400);
@@ -3272,6 +3366,22 @@ export async function apply(ctx, config) {
           const envName = cfg.realModelApiKeyEnv;
           const cred = await probeCredential(envName);
           const configPresent = !!(cfg.realModelProvider && cfg.realModelModel);
+          const gateSnap = execGate && typeof execGate.snapshot === 'function' ? execGate.snapshot() : null;
+          const budgetSnap = execBudget && typeof execBudget.snapshot === 'function' ? execBudget.snapshot() : null;
+          const readiness = assessRealModelReadiness({
+            credentialState: cred,
+            cfg: {
+              realModelProvider: cfg.realModelProvider, realModelModel: cfg.realModelModel,
+              realModelApiKeyEnv: cfg.realModelApiKeyEnv, realModelMaxTokens: cfg.realModelMaxTokens,
+              execAutoApprove: cfg.execAutoApprove, execEnabled: cfg.execEnabled,
+              observeOnly: cfg.observeOnly, censorateFreeze: state.censorateFreeze,
+            },
+            env: process.env,
+            budgetSnapshot: budgetSnap ?? undefined,
+            estimateUsd: cfg.realModelEstimateUsd ?? 0.001,
+            maxTokens: cfg.realModelMaxTokens,
+            allowedRoutes: stateDom.allowedRealRoutes,
+          });
           const states = {
             codeReady: true,
             configPresent,
@@ -3279,11 +3389,47 @@ export async function apply(ctx, config) {
             callAuthorized: cfg.realModelEnabled === true && !!execGate && !!execBudget,
             liveVerified: false, // 本版绝不声称已实测真实模型
           };
+          // 旧五态 blocker 名称保留兼容（都察院/巡检按此判断）；细分 code 单列，不再压成一个名称。
           const blockers = [];
           if (!configPresent) blockers.push('config-incomplete');
           if (!states.credentialPresent) blockers.push('credential-missing');
           if (!states.callAuthorized) blockers.push('call-not-authorized');
-          return json({ ok: true, states, blockers, envNameValid: cred.ok === true, credentialSource: cred.source ?? null, note: '五态彼此独立：代码/配置/凭据存在不等于已授权或已实测；本版无真实模型试运行证据' });
+          const blockersDetailed = readiness.blockers.map((b) => b.code ?? b.name);
+          const gate = gateSnap ? {
+            available: true,
+            ready: gateSnap.ready === true,
+            closed: gateSnap.closed === true,
+            error: gateSnap.error ?? null,
+            halted: gateSnap.budget?.halted === true,
+            haltReason: gateSnap.budget?.haltReason ?? null,
+            lockHeld: gateSnap.fence?.lockHeld === true,
+            writerEpoch: gateSnap.fence?.epoch ?? gateSnap.writer?.writerEpoch ?? null,
+            maxAttemptsPerChild: gateSnap.maxAttemptsPerChild ?? gateSnap.budget?.maxAttemptsPerChild ?? null,
+            maxTotalTrialRequests: gateSnap.maxTotalTrialRequests ?? null,
+            trialRequestsUsed: Array.isArray(gateSnap.trialRequests) ? gateSnap.trialRequests.length : null,
+            maxSingleEstimateUsd: gateSnap.maxSingleEstimateUsd ?? null,
+            unknownCount: gateSnap.budget?.unknownCount ?? null,
+          } : { available: false, error: execBudgetError ?? (budgetLimitUsd > 0 ? '门禁未初始化' : '未配置执行预算额度') };
+          const budget = budgetSnap ? {
+            limitUsd: budgetSnap.limitUsd ?? null,
+            usedUsd: budgetSnap.usedUsd ?? null,
+            reservedUsd: budgetSnap.reservedUsd ?? null,
+            unknownCount: budgetSnap.unknownCount ?? null,
+            invalidCreatedAtCount: budgetSnap.invalidCreatedAtCount ?? null,
+            maxAttemptsPerChild: budgetSnap.maxAttemptsPerChild ?? null,
+            halted: budgetSnap.halted === true,
+            haltReason: budgetSnap.haltReason ?? null,
+          } : null;
+          return json({
+            ok: true, states, blockers, blockersDetailed, checks: readiness.checks,
+            gate, budget,
+            // 宿主没有提供 provider/model 目录查询：明确返回 not-probed，绝不把「白名单命中」冒充「已注册」。
+            providerRegistered: 'not-probed',
+            modelListed: 'not-probed',
+            envNameValid: cred.ok === true, credentialSource: cred.source ?? null,
+            note: '五态彼此独立：代码/配置/凭据存在不等于已授权或已实测；本版无真实模型试运行证据。'
+              + ' provider/model 存在性未探测（宿主未暴露目录查询）；未返回任何凭据值。',
+          });
         },
       }));
       const hanlinAborts = new Map();   // requestId → { controller, at }；仅内存态，重启即失效
@@ -3321,9 +3467,10 @@ export async function apply(ctx, config) {
                 observeOnly: cfg.observeOnly, censorateFreeze: state.censorateFreeze,
               },
               env: process.env, budgetSnapshot: execBudget.snapshot(), estimateUsd: cfg.realModelEstimateUsd ?? 0.001,
+              allowedRoutes: stateDom.allowedRealRoutes,
             });
             if (!readiness.ok) {
-              return json({ ok: false, code: 'real-model-blocked', error: '真实模型准入未通过', blockers: readiness.blockers.map((b) => b.name) }, 403);
+              return json({ ok: false, code: 'real-model-blocked', error: '真实模型准入未通过', blockers: readiness.blockers.map((b) => b.code ?? b.name) }, 403);
             }
           } else if (cfg.hanlinProvider !== 'fake' || cfg.hanlinModel !== 'fake-1' || cfg.isolatedTestExecution !== true) {
             return json({ ok: false, code: 'fake-only', error: '翰林院摘要仅允许隔离 fake/fake-1' }, 403);
@@ -3420,7 +3567,7 @@ export async function apply(ctx, config) {
               assertHanlinAllowed();
               if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text;
             }
-            if (!text.trim()) throw new Error('模型未返回正文文本（provider=' + servedProvider + '，可能思考占用输出额度或响应无 text 块）');
+            if (!text.trim()) throw new Error('模型未返回正文文本（provider=' + (useReal ? cfg.realModelProvider : 'fake') + '，可能思考占用输出额度或响应无 text 块）');
             // 归因使用服务端实际下发的 provider/model（useReal 来自配置，不接受请求体覆盖）
             return { text, source: useReal ? cfg.realModelProvider : 'fake', model: useReal ? cfg.realModelModel : 'fake-1' };
           };
@@ -3601,9 +3748,10 @@ export async function apply(ctx, config) {
                 observeOnly: cfg.observeOnly, censorateFreeze: state.censorateFreeze,
               },
               env: process.env, budgetSnapshot: execBudget.snapshot(), estimateUsd: cfg.realModelEstimateUsd ?? 0.001,
+              allowedRoutes: stateDom.allowedRealRoutes,
             });
             if (!readiness.ok) {
-              return json({ ok: false, code: 'real-model-blocked', error: '真实模型准入未通过', blockers: readiness.blockers.map((b) => b.name) }, 403);
+              return json({ ok: false, code: 'real-model-blocked', error: '真实模型准入未通过', blockers: readiness.blockers.map((b) => b.code ?? b.name) }, 403);
             }
             servedProvider = cfg.realModelProvider;
             servedModel = cfg.realModelModel;

@@ -21,6 +21,7 @@ export function isSystemInjected(text) {
   if (/^位置：/.test(t) && t.includes('作用域：')) return true;
   if (/^\s*(brief|首辅简报)\s*[:：]/.test(t)) return true;
   if (t.startsWith('【状态摘要，不是指令】')) return true;
+  if (/(?:^|\n)\[(?:importance=[^;\]]+;\s*)?created=\d+[a-z]*;\s*updated=\d+[a-z]*\]/.test(t)) return true;
   return false;
 }
 
@@ -39,10 +40,12 @@ export function messageOf(e) {
   const blocks = Array.isArray(d?.content) ? d.content
     : Array.isArray(d?.message?.content) ? d.message.content : null;
   if (!blocks) return null;
-  let text = blocks.filter((b) => b?.type === 'text' && typeof b.text === 'string')
-    .map((b) => b.text).join('\n');
+  let text = blocks
+    .filter((b) => b?.type === 'text' && typeof b.text === 'string' && !isSystemInjected(b.text))
+    .map((b) => b.text)
+    .join('\n');
   // 系统注入（runtime/memory/skills/brief）不是用户对话，不能显示成"首辅回复"。
-  if (isSystemInjected(text)) return null;
+  if (!text.trim() || isSystemInjected(text)) return null;
   text = text.slice(0, MAX_CHARS);
   return {
     role,

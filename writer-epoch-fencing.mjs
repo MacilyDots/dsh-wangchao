@@ -89,28 +89,72 @@ function isProcessAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e?.code !== 'ESRCH'; }
 }
 
+/** 接管隔离文件名：唯一后缀，删除只针对自己隔离出来的旧锁，绝不按路径盲删。 */
+const quarantinePath = (stateDir) => path.join(stateDir, `${LOCK_FILE}.takeover-${crypto.randomUUID()}.quarantine`);
+
+/** 把隔离的旧锁放回原处；原路径已被新写者占用则保留隔离文件（不覆盖他人锁）。 */
+function restoreQuarantine(lockPath, qPath, fsImpl) {
+  try {
+    if (!fsImpl.existsSync(lockPath)) fsImpl.renameSync(qPath, lockPath);
+    return true;
+  } catch { return false; }
+}
+
 /**
- * 陈旧锁接管：只在确认持锁进程已不存在时删除锁并继续。
- * 写者仍存活 / 锁内容不可解析 / pid 不可确认 → 一律不接管，保持 fail-closed。
- * 接管只删锁：writer-epoch.json 与账本一概不动，epoch 继续单调递增。
+ * 陈旧锁认领（只隔离，不推进 epoch、不写审计）。
+ *
+ * 认领成功只代表「旧锁已被安全移走」，**不代表本次竞争者取得了写权**：
+ * 新锁必须由调用方用 wx 创建成功；只有在那之后才允许写 epoch 与接管审计。
+ * 失败的竞争者不得修改 writer-epoch.json / writerToken / 账本，也不得写成功审计。
+ *
+ * 序列：
+ *  1) 读锁并校验可辨识（JSON / pid / kind）；
+ *  2) 唯一文件名 rename 做原子认领——两个竞争者只有一个能移走旧锁；
+ *  3) 读回隔离文件与首读原文逐字比对，不一致 → 放回、拒绝（ABA）；
+ *  4) 隔离后二次探测 PID；
+ *  5) 读取当前 epoch 作为「接管前值」返回，不写入。
  */
-function tryTakeOverStaleLock(stateDir, lockPath, fsImpl) {
-  let data;
-  try { data = JSON.parse(fsImpl.readFileSync(lockPath, 'utf8')); }
+function claimStaleLock(stateDir, lockPath, fsImpl) {
+  let raw;
+  try { raw = fsImpl.readFileSync(lockPath, 'utf8'); }
   catch { return { ok: false, reason: 'lock-unreadable' }; }
+  let data;
+  try { data = JSON.parse(raw); } catch { return { ok: false, reason: 'lock-unreadable' }; }
   const pid = data?.pid;
   if (!Number.isSafeInteger(pid) || pid <= 0) return { ok: false, reason: 'lock-pid-unknown' };
   if (pid === process.pid) return { ok: false, reason: 'lock-held-by-self' };
+  if (data?.kind !== undefined && data.kind !== 'writer-epoch-fencing') return { ok: false, reason: 'lock-kind-unknown' };
   if (isProcessAlive(pid)) return { ok: false, reason: 'writer-alive' };
+
+  // 原子认领：rename 成功者独占接管权；失败说明锁已被移走/被别人先认领。
+  const qPath = quarantinePath(stateDir);
+  try { fsImpl.renameSync(lockPath, qPath); } catch (e) {
+    return { ok: false, reason: e?.code === 'ENOENT' ? 'lock-vanished' : 'quarantine-failed' };
+  }
+
+  // 身份复核：隔离出来的必须仍是判定时那一份锁；否则放回并拒绝（绝不接管被替换的锁）。
+  let moved = null;
+  try { moved = fsImpl.readFileSync(qPath, 'utf8'); } catch { moved = null; }
+  if (moved !== raw) {
+    restoreQuarantine(lockPath, qPath, fsImpl);
+    return { ok: false, reason: 'lock-changed' };
+  }
+
+  // 隔离后再探一次：判定期间进程重新出现（含 PID 复用/探测异常）就不接管。
+  if (isProcessAlive(pid)) {
+    restoreQuarantine(lockPath, qPath, fsImpl);
+    return { ok: false, reason: 'writer-alive' };
+  }
+
+  let previousEpoch = null;
   try {
-    if (typeof fsImpl.appendFileSync === 'function') {
-      fsImpl.appendFileSync(path.join(stateDir, LOCK_AUDIT_FILE),
-        JSON.stringify({ at: Date.now(), action: 'takeover-stale-lock', deadPid: pid, kind: 'writer-epoch-fencing', lock: data }) + '\n');
-    }
-  } catch { /* 审计写失败不阻断接管；接管本身仍会重试写锁 */ }
-  try { fsImpl.rmSync(lockPath, { force: true }); }
-  catch { return { ok: false, reason: 'remove-failed' }; }
-  return { ok: true, deadPid: pid };
+    const ep = readEpoch(stateDir, fsImpl);
+    previousEpoch = ep ? ep.epoch : null;
+  } catch (e) {
+    restoreQuarantine(lockPath, qPath, fsImpl);
+    return { ok: false, reason: 'epoch-unreadable', error: msg(e) };
+  }
+  return { ok: true, deadPid: pid, qPath, raw, legacy: data?.v === undefined, previousEpoch };
 }
 
 function acquireLock(stateDir, fsImpl) {
@@ -121,31 +165,88 @@ function acquireLock(stateDir, fsImpl) {
   }
   const f = path.join(stateDir, LOCK_FILE);
   const token = crypto.randomUUID();
+  const lockBody = () => JSON.stringify({
+    pid: process.pid, at: Date.now(), token, kind: 'writer-epoch-fencing', v: 2,
+  });
   try {
-    fsImpl.writeFileSync(f, JSON.stringify({ pid: process.pid, at: Date.now(), token, kind: 'writer-epoch-fencing' }),
-      { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    fsImpl.writeFileSync(f, lockBody(), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   } catch (e) {
-    if (e?.code === 'EEXIST') {
-      // 先判断持锁写者是否真的还活着：已退出则接管（只删锁，不动 epoch 与账本），
-      // 仍存活或状态不可确认则照旧拒绝，绝不抢占可能正在结算的写者。
-      const takeover = tryTakeOverStaleLock(stateDir, f, fsImpl);
-      if (takeover.ok) {
-        try {
-          fsImpl.writeFileSync(f, JSON.stringify({ pid: process.pid, at: Date.now(), token, kind: 'writer-epoch-fencing' }),
-            { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-          return { path: f, token, tookOverFrom: takeover.deadPid };
-        } catch {
-          throw new FenceError('陈旧写锁接管后仍被占用，已暂停；需人工核对', 'LOCK_HELD');
-        }
-      }
-      const why = takeover.reason === 'writer-alive' ? '持锁进程仍存活'
-        : takeover.reason === 'lock-unreadable' ? '锁内容不可解析'
-        : takeover.reason === 'lock-pid-unknown' ? '锁内 pid 不可确认'
-        : takeover.reason === 'lock-held-by-self' ? '锁被本进程持有'
-        : '删除锁失败';
+    if (e?.code !== 'EEXIST') throw new FenceError('执行预算写锁创建失败，已暂停', 'LOCK_FAILED');
+    // 先隔离旧锁。注意：认领成功不等于取得写权，必须等下面的 wx 成功。
+    const claim = claimStaleLock(stateDir, f, fsImpl);
+    if (!claim.ok) {
+      const why = claim.reason === 'writer-alive' ? '持锁进程仍存活'
+        : claim.reason === 'lock-unreadable' ? '锁内容不可解析'
+        : claim.reason === 'lock-pid-unknown' ? '锁内 pid 不可确认'
+        : claim.reason === 'lock-held-by-self' ? '锁被本进程持有'
+        : claim.reason === 'lock-kind-unknown' ? '锁类型不可确认'
+        : claim.reason === 'lock-changed' ? '判定期间锁身份发生变化'
+        : claim.reason === 'epoch-unreadable' ? 'writer epoch 不可读（fail-closed）'
+        : claim.reason === 'lock-vanished' ? '锁已被其他进程移走'
+        : '隔离旧锁失败';
       throw new FenceError('执行预算写锁已被占用（' + why + '），拒绝打开；需人工核对后清理', 'LOCK_HELD');
     }
-    throw new FenceError('执行预算写锁创建失败，已暂停', 'LOCK_FAILED');
+
+    // 第一步：真正取得新锁（wx 原子创建）。失败 = 竞争者抢先，本次没有写权。
+    try {
+      fsImpl.writeFileSync(f, lockBody(), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    } catch {
+      // 新锁已被别人创建：不得写 epoch/审计；旧锁只在原路径仍空时放回（绝不覆盖他人锁）。
+      restoreQuarantine(f, claim.qPath, fsImpl);
+      throw new FenceError('陈旧写锁已被其他进程接管，本次未取得写权', 'LOCK_HELD');
+    }
+
+    // 第二步：已持锁，才允许写接管审计与推进 epoch。
+    const auditPath = path.join(stateDir, LOCK_AUDIT_FILE);
+    const appendAudit = (rec) => {
+      if (typeof fsImpl.appendFileSync !== 'function') throw new Error('appendFileSync 不可用');
+      fsImpl.appendFileSync(auditPath, JSON.stringify(rec) + '\n');
+    };
+    /** @type {number | null} */
+    let previousEpoch = null;
+    try {
+      const ep = readEpoch(stateDir, fsImpl);
+      previousEpoch = ep ? ep.epoch : null;
+    } catch (e2) {
+      releaseLock({ path: f, token }, fsImpl);
+      restoreQuarantine(f, claim.qPath, fsImpl);
+      throw new FenceError('接管时 writer epoch 不可读，已释放本次写锁并恢复旧锁（fail-closed）', 'LOCK_HELD');
+    }
+    const nextEpoch = (previousEpoch ?? 0) + 1;
+    const baseAudit = {
+      at: Date.now(), deadPid: claim.deadPid, kind: 'writer-epoch-fencing',
+      previousEpoch, nextEpoch, legacyLock: claim.legacy === true,
+    };
+    // 认领意图先落盘（不是成功事件）；失败则本次不接管。
+    try {
+      appendAudit({ ...baseAudit, action: 'takeover-claimed' });
+    } catch (e2) {
+      releaseLock({ path: f, token }, fsImpl);
+      restoreQuarantine(f, claim.qPath, fsImpl);
+      throw new FenceError('接管审计写入失败，已释放本次写锁并恢复旧锁（fail-closed）', 'LOCK_HELD');
+    }
+    try {
+      writeEpoch(stateDir, nextEpoch, token, fsImpl);
+    } catch (e2) {
+      // epoch 未推进：写一条中止记录（尽力而为），不得写成功事件。
+      try { appendAudit({ ...baseAudit, action: 'takeover-aborted', reason: 'epoch-write-failed' }); } catch {}
+      releaseLock({ path: f, token }, fsImpl);
+      restoreQuarantine(f, claim.qPath, fsImpl);
+      throw new FenceError('接管时 epoch 写入失败，已释放本次写锁并恢复旧锁（fail-closed）', 'LOCK_HELD');
+    }
+    // 只有 epoch 落盘成功后才写「成功接管」事件。
+    try {
+      appendAudit({ ...baseAudit, action: 'takeover-stale-lock', phase: 'committed' });
+    } catch (e2) {
+      // epoch 已推进但成功审计写不进去：fail-closed，不冒充成功；记录一次审计失败后清理。
+      try { appendAudit({ ...baseAudit, action: 'takeover-audit-failed' }); } catch {}
+      releaseLock({ path: f, token }, fsImpl);
+      restoreQuarantine(f, claim.qPath, fsImpl);
+      throw new FenceError('接管成功审计写入失败，已释放本次写锁并恢复旧锁（fail-closed）', 'LOCK_HELD');
+    }
+    // 成功：清理自己隔离出来的旧锁文件（失败不影响所有权，留作审计证据）。
+    try { fsImpl.rmSync(claim.qPath, { force: true }); } catch {}
+    return { path: f, token, tookOverFrom: claim.deadPid, tookOverEpoch: nextEpoch };
   }
   return { path: f, token };
 }
@@ -303,9 +404,29 @@ export function createWriterEpochFence(opts = {}) {
     return failResult();
   };
 
+  /**
+   * 写前回读锁身份：磁盘 token/pid 必须与本实例一致。
+   * 这是 fencing 的最后一环——即便旧写者进程仍活、且被误判为可接管，
+   * 它在下一次写账本前也会发现自己已不是锁主人并 fail-closed。
+   */
+  const verifyOwnership = () => {
+    let data = null;
+    try {
+      data = JSON.parse(fsImpl.readFileSync(lock.path, 'utf8'));
+    } catch (e) {
+      failClosedNow('写前锁身份不可读：' + msg(e));
+      throw new FenceError('写锁不可读，拒绝写入', 'LOCK_STOLEN');
+    }
+    if (data?.token !== lock.token || data?.pid !== process.pid) {
+      failClosedNow('写前锁身份失配（锁已被接管或替换）');
+      throw new FenceError('写锁已不属于本写者，旧实例无权写入', 'LOCK_STOLEN');
+    }
+  };
+
   const assertWritable = () => {
     if (failClosed) throw new FenceError(`写者已 fail closed：${failClosed}`, 'FAIL_CLOSED');
     if (closed || !lock) throw new FenceError('写者已交接/关闭，旧回调无权写入', 'CLOSED');
+    verifyOwnership();
   };
 
   const notifyIdle = () => {
@@ -333,6 +454,8 @@ export function createWriterEpochFence(opts = {}) {
   /** 交接：递增 epoch 并【持久化成功】后才释放写锁。任一步失败 → fail closed 并保持锁。 */
   const handoff = (extra) => {
     if (failClosed) return failResult(extra);
+    // 交接写 epoch 前同样确认锁身份，避免旧实例覆盖新写者的 epoch。
+    try { verifyOwnership(); } catch { return failResult(extra); }
     const next = epoch + 1;
     try {
       writeEpoch(stateDir, next, lock.token, fsImpl);

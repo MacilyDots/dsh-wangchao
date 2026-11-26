@@ -2,7 +2,7 @@
 // 职责：每次请求构造带“实时授权”的 store 闭包、参数校验、错误码映射。
 // 不调用模型、不读会话正文；实时 cwd 只能来自注入的 liveCwdMap。
 import { FACT_KINDS, EVIDENCE_KINDS } from './project-facts.mjs';
-import { buildRecoveryPack } from './recovery-pack.mjs';
+import { buildRecoveryPack, sanitizeRecoveryPack } from './recovery-pack.mjs';
 import { searchResearchHistory } from './research-search.mjs';
 
 const obj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -16,7 +16,8 @@ const STATUS = {
 // 写操作集合：这些 action 有落盘副作用，规则变化时无法作废，只能如实标注。
 const WRITE_ACTIONS = new Set(['create', 'update', 'link', 'unlink', 'linkReview',
   'addFact', 'confirmFact', 'rejectFact', 'reviseFact', 'supersedeFact', 'reminderReview',
-  'lockFact', 'unlockFact', 'transitionResearch', 'setAliases']);
+  'lockFact', 'unlockFact', 'transitionResearch', 'setAliases',
+  'captureIdea', 'reviewIdea', 'promoteIdea']);
 
 /**
  * @param {object} deps
@@ -145,21 +146,44 @@ export function createProjectHttpAdapter({ file, liveCwdMap, decideAccess, isAll
         case 'setAliases':
           need(body, 'projectId');
           payload = store.setAliases({ projectId: body.projectId, aliases: body.aliases, expectedRevision: rev(body) }); break;
+        case 'captureIdea':
+          need(body, 'statement');
+          payload = store.captureIdea({ statement: body.statement, title: body.title,
+            sourceSessionId: body.sourceSessionId ?? null, sourceSeq: body.sourceSeq ?? null,
+            voice: body.voice ?? 'manual', actor: body.actor ?? 'user', expectedRevision: rev(body) }); break;
+        case 'listIdeas':
+          payload = { ideas: store.listIdeas() }; break;
+        case 'reviewIdea':
+          need(body, 'ideaId');
+          payload = store.reviewIdea({ ideaId: body.ideaId, decision: body.decision,
+            statement: body.statement, reason: body.reason, actor: body.actor ?? 'user', expectedRevision: rev(body) }); break;
+        case 'promoteIdea':
+          need(body, 'ideaId');
+          payload = store.promoteIdea({ ideaId: body.ideaId, actor: body.actor ?? 'user', expectedRevision: rev(body) }); break;
         case 'recoveryPack': {
           need(body, 'id');
           const detail = store.get(body.id);
-          payload = buildRecoveryPack({ projectDetail: detail, canAccessSession, generatedAt: body.generatedAt ?? new Date().toISOString() });
+          const ctxData = typeof getSearchContext === 'function' ? (getSearchContext(canAccessSession) || {}) : {};
+          payload = buildRecoveryPack({
+            projectDetail: detail,
+            canAccessSession,
+            generatedAt: body.generatedAt ?? new Date().toISOString(),
+            summariesBySession: ctxData.summaries && typeof ctxData.summaries === 'object' ? ctxData.summaries : {},
+            lineages: Array.isArray(ctxData.lineages) ? ctxData.lineages : [],
+          });
+          payload = sanitizeRecoveryPack(payload);
           break;
         }
         case 'researchSearch': {
           need(body, 'q');
-          const ctxData = typeof getSearchContext === 'function' ? (getSearchContext() || {}) : {};
+          const ctxData = typeof getSearchContext === 'function' ? (getSearchContext(canAccessSession) || {}) : {};
           const limitNum = body.limit !== undefined ? Number(body.limit) : 30;
           payload = searchResearchHistory({
             query: body.q,
             projectStore: store,
             sessions: Array.isArray(ctxData.sessions) ? ctxData.sessions : [],
             summaries: ctxData.summaries && typeof ctxData.summaries === 'object' ? ctxData.summaries : {},
+            ideaInbox: { list: () => store.listIdeas() },
             canAccessSession,
             limit: Number.isSafeInteger(limitNum) && limitNum > 0 ? Math.min(limitNum, 100) : 30,
           });

@@ -1,6 +1,6 @@
 // 真实模型上线准备：非敏感适配层（不改动已审核核心，不读取任何凭据值）。
 //
-// 设计边界（与 ROADMAP-V040 §5.2 对齐）：
+// 设计边界（与真实模型准入契约对齐）：
 //  - 本模块只做「准入判定」与「路由规范化」，不发起任何模型请求、不读凭据值、不写状态。
 //  - 凭据只做「存在性 + 命名规范」检查，返回值里永远不包含 secret 本身。
 //  - 预算门禁复用 exec-gate-wiring/exec-budget 的账本口径（used/reserved/unknown/limitUsd），
@@ -11,6 +11,7 @@ import path from 'node:path';
 /** 与 exec-gate-wiring 保持一致的唯一默认真实路由（试验期）。 */
 export const DEFAULT_REAL_ROUTES = Object.freeze([
   Object.freeze({ provider: 'deepseek-official', model: 'deepseek-flash' }),
+  Object.freeze({ provider: 'deepseek-account', model: 'deepseek-flash' }),
 ]);
 
 /** 凭据环境变量命名规范：大写字母/数字/下划线，且必须以 _KEY 或 _TOKEN 结尾，避免误读配置路径。 */
@@ -112,7 +113,11 @@ export function assessRealModelReadiness(input = {}) {
   const blockers = [];
   const checks = [];
 
-  const add = (name, ok, detail) => { checks.push({ name, ok, detail }); if (!ok) blockers.push({ name, ...detail }); };
+  const add = (name, ok, detail) => {
+    const code = detail?.code ?? name;
+    checks.push({ name, ok, code, detail });
+    if (!ok) blockers.push({ name, ...detail, code });
+  };
 
   // 1) 路由白名单
   const route = resolveRealRoute({ provider: cfg.realModelProvider, model: cfg.realModelModel }, { allowedRoutes: input.allowedRoutes });

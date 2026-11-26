@@ -253,6 +253,7 @@ export function openExecBudget({ dir, limitUsd, pricePerTokenUsd, maxAttemptsPer
         usedUsd: Number(usedUsd().toFixed(6)),
         reservedUsd: Number(reservedUsd().toFixed(6)),
         unknownCount: unknownCount(),
+        invalidCreatedAtCount: data.entries.filter((e) => !Number.isFinite(e.createdAt)).length,
         entriesCount: data.entries.length,
         entries: data.entries.slice(-20).map((e) => ({ ...e })),
         halted,
@@ -273,7 +274,9 @@ export function openExecBudget({ dir, limitUsd, pricePerTokenUsd, maxAttemptsPer
       if (role !== undefined && !ATTRIBUTION_ROLES.has(role)) throw new Error('模型调用 role 不可确认，拒绝发请求');
       if (unknownCount() > 0) throw new Error('存在费用未知的历史请求，已暂停新的真实调用');
       const today = dayKeyOf(Date.now());
-      const attempts = data.entries.filter((e) => e.childId === cid && dayKeyOf(e.createdAt) === today).length;
+      // createdAt 缺失/非法的旧条目不能算作「不在今天」而放宽上限：按 fail-closed 计入。
+      const attempts = data.entries.filter((e) => e.childId === cid
+        && (!Number.isFinite(e.createdAt) || dayKeyOf(e.createdAt) === today)).length;
       if (attempts >= attemptsPerChild) {
         throw new Error(`执行子会话当日 attempt 已达上限 ${attemptsPerChild}，拒绝再次发请求`);
       }
