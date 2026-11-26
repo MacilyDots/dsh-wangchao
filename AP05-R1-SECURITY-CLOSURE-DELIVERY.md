@@ -160,33 +160,34 @@
 `B:\DSH\Agent\_t5\ap05-r1-frozen-failed-candidate\dsh-wangchao-0.5.0-alpha.5.failed.tgz`，
 SHA-256 仍为 `6F2EDFA859658749C08489451EC9740448BFB68440B4EAA7CBAB592333428081`。
 
-## 9. alpha.4.1 公开版本风险对照
+## 9. alpha.4.1 公开版本风险对照（2026-11-26 更正）
 
-只读检查公开包 `wangchao-alpha41-package\dsh-wangchao-0.5.0-alpha.4.1-limited-ai.tgz`：
+**重要更正**：R1 初版报告把本地 `wangchao-alpha41-package\dsh-wangchao-0.5.0-alpha.4.1-limited-ai.tgz`
+（`1C4DA2B5…`）当作公开 alpha.4.1 依据，该包是本地 limited-ai 变体，**不是 npm 已发布物**。
+以 npm registry 实际发布的 `dsh-wangchao@0.5.0-alpha.4.1`（`D39EB65FCE437ECF85E8ACC1F034078588656021B307CC46FE8D4729C5078949`，52 文件，357,895 B）为准复核如下：
 
-| 项 | alpha.4.1 | alpha.5 R1 |
+| 项 | 公开 alpha.4.1（npm） | alpha.5 R1 |
 |---|---|---|
-| 规则合并 | `state.rulesOverride ? normalizeRuleSet(override) : normalizeRuleSet(cfgRules)`，整份覆盖，无字段继承 | 三态按字段合并 |
+| 规则合并 | 按字段「非空覆盖、空数组回落基线」，无格式迁移 | 三态按字段合并 + 维度迁移 |
 | UI 保存 | `saveCurrent` 全量提交四个字段 | 只提交已编辑字段 + 确认门禁 |
-| 自动接管 | **无**；`EEXIST` 直接 `LOCK_HELD`，要求人工清理 | 有，两阶段安全时序 |
+| 自动接管 | **有**：读锁 → PID 探测 → 写审计（失败吞掉）→ 按路径 `rmSync` → `wx` 重建；无身份复核、不推进 epoch、无写前 token 校验 | 有，两阶段安全时序 + fencing |
 
-**F-01：公开 alpha.4.1 存在同类风险**。只读探针（alpha.4.1 源码 + 合成 state）：
+**F-01：公开 alpha.4.1 的风险形态与 R1 报告不同**。
+- 不存在“旧格式空数组迁移清空基线拒绝规则”的问题（空数组会回落基线）；
+- 但存在“首次面板保存后配置基线被冻结”的问题：保存会把当时的四个字段整体写入 override，之后修改配置文件的 `allowCwds`/`excludeCwds`/`excludeSessions` 不再生效；若配置文件后来新增拒绝项，而 override 里是旧的非空排除列表，新拒绝项会被旧列表遮蔽（潜在扩大范围）。
+- 另外“显式清空允许/排除”在 alpha.4.1 无法持久（空数组回落基线），用户清空意图失效。
 
-```
-rulesOverride: { allowCwds:[root], excludeCwds:[], allowSessions:[], excludeSessions:[] }
-config:        { allowCwds:[root], excludeCwds:[secret], excludeSessions:['s-secret'] }
-=> secretSession: allowed-by-cwd
-=> secretDir:     allowed-by-cwd
-```
+**F-02：公开 alpha.4.1 存在同类自动接管风险**。npm 包的 `writer-epoch-fencing.mjs` 已含自动接管：
+`readFileSync → isProcessAlive → appendFileSync（异常被吞）→ rmSync(lockPath)（无身份校验/无原子认领）→ wx`；
+接管不推进 epoch、不绑定 token、没有写前 `verifyOwnership`。因此 PROBE_2 类竞态（双竞争者、误删新锁、旧写者继续写、审计 fail-open）**适用于公开 alpha.4.1**，不限于 alpha.5。
 
-即：只要 `state.json` 里存在 `rulesOverride` 且排除字段为空，配置文件的 `excludeCwds` / `excludeSessions` 会被整份覆盖掉，受限会话/目录被放行。**影响范围**：alpha.4.1 公开版、已通过面板保存过规则且配置文件后来新增/修改过排除规则的实例。
+**影响范围**：alpha.4.1 公开版所有使用预算门禁/执行账本的实例；触发需要“陈旧锁 + 并发启动/异常退出”，常规单实例启动不受影响。
 
-**建议临时措施（交项目经理决定，未执行）**：
-1. 检查 `state.json` 是否存在 `rulesOverride`；若存在且 `excludeCwds`/`excludeSessions` 为空、而配置有排除规则 → 删除整个 `rulesOverride`（等价“恢复默认”）并重启；
-2. 或临时把排除规则改为只靠 `excludeSessions`/`excludeCwds` 的配置，并在面板保存后核对实际生效值；
-3. 若要紧急修复公开版，需要单独授权打补丁/发版；本轮未执行。
-
-**F-02：公开 alpha.4.1 不存在自动接管**（`EEXIST` 直接拒绝，人工清锁），因此 PROBE_2 的竞态不适用于公开版；该风险是 alpha.5 新引入并已在本轮修复。生产 `leader` 目录的未发布代码包含自动接管，但未发布、未在本轮修改。
+**临时规避建议（交项目经理/用户决定，未执行）**：
+1. 升级到 alpha.5.1 候选（含完整修复）是最直接路径；
+2. 暂不升级时：避免在面板保存规则后修改配置文件；核对 `state.json.rulesOverride` 与配置一致，必要时删除 override 回到配置基线；
+3. 异常退出后不要直接重启让插件自动接管：先确认无活跃写者，再人工删除 `exec-budget.lock`（保留 `writer-epoch.json` 与账本）；
+4. 若决定为 alpha.4.1 单独打补丁，最小回移范围见 AP-06 的补丁成本评估。
 
 ## 10. 生产完整性
 
