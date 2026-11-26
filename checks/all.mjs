@@ -13,6 +13,7 @@ const CHECKS = [
   './04-warroom.mjs',
   './09-code-fingerprint.mjs',
   './10-exec-bridge-invariants.mjs',
+  './11-internal-id-scan.mjs',
 ];
 
 const t0 = performance.now();

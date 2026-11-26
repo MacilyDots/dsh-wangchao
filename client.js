@@ -910,7 +910,7 @@ window.__ModuleLoader__.load({
       });
       const inheritedExcludes = ['excludeCwds', 'excludeSessions'].filter(function (k) {
         // 与服务端口径一致：只要基线该维度非空、保存的是空数组，就必须确认；
-        // 不因该字段此前已被面板覆盖过而跳过（F-05：覆盖后再次清空也必须能确认）。
+        // 不因该字段此前已被面板覆盖过而跳过（覆盖后再次清空也必须能确认）。
         return Array.isArray(baseRules[k]) && baseRules[k].length > 0;
       });
       const field = function (key, label, hint) {
