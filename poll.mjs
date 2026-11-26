@@ -35,7 +35,7 @@
 /**
  * 创建轮询域。
  * @param {{
- *   probeSessionIndex: Function, persistenceService: any, rules: any,
+ *   probeSessionIndex: Function, persistenceService: any, rules: any, rulesNow?: () => any,
  *   liveRuntime: any, isChiefSession: Function, pendingMark: string,
  *   maxPerPoll: number, state: any, stateLoadIssue: string | null,
  *   persistState: Function, ctx: any, decideAccess: Function,
@@ -43,7 +43,10 @@
  * }} deps 由 apply() 注入的闭包依赖。
  */
 export function createPollDomain(deps) {
-  const { probeSessionIndex, persistenceService, rules, liveRuntime, isChiefSession, pendingMark, maxPerPoll, state, stateLoadIssue, persistState, ctx, decideAccess, isAllowed, fs, createLiveStreams, saveState } = deps;
+  const { probeSessionIndex, persistenceService, rules: initialRules, rulesNow, liveRuntime, isChiefSession, pendingMark, maxPerPoll, state, stateLoadIssue, persistState, ctx, decideAccess, isAllowed, fs, createLiveStreams, saveState } = deps;
+  // 规则是权限边界：每次判权都读当前值，不能沿用域创建时的快照。
+  // 否则面板收紧规则后，轮询仍按旧授权继续读取并写盘（P0-1 实测缺陷）。
+  const currentRules = () => (typeof rulesNow === 'function' ? rulesNow() : initialRules);
 
   /**
    * @param {string} id
@@ -122,7 +125,7 @@ export function createPollDomain(deps) {
   const permittedLive = (agent) => {
     const id = agent?.id, cwd = agent?.session?.header?.cwd;
     return !stateLoadIssue && typeof id === 'string' && !/^session-chief-/.test(id)
-      && !isChiefSession(id) && isAllowed(decideAccess(rules, id, cwd));
+      && !isChiefSession(id) && isAllowed(decideAccess(currentRules(), id, cwd));
   };
   // sessionController filters by session ID in the DSH host before delivering
   // events to this plugin; an agent-scoped listener also matches descendants.
@@ -245,7 +248,7 @@ export function createPollDomain(deps) {
         const cwd = r.header?.cwd ?? null;
         // 首辅会话不进入采集范围
         if (isChiefSession(id)) { report.skipped.push({ id, reason: 'excluded-chief' }); continue; }
-        const verdict = decideAccess(rules, id, cwd);
+        const verdict = decideAccess(currentRules(), id, cwd);
         if (!isAllowed(verdict)) { report.skipped.push({ id, reason: verdict }); continue; }
         // 保留原始值，不做布尔归一：undefined/null/其他值都表示「状态不明」，
         // 后面只有明确 === false 才允许跳读。若在这里归一成 false，
@@ -319,7 +322,7 @@ export function createPollDomain(deps) {
           // allowedList 生成于 persistence.list() 之前，那次调用有 await，
           // 期间规则可能已被收紧。跳读不读正文，但同样不能在已撤权的记录上
           // 更新检查状态，所以这里用当前规则重新判权一次。
-          const nowVerdict = decideAccess(rules, item.id, item.cwd);
+          const nowVerdict = decideAccess(currentRules(), item.id, item.cwd);
           if (!isAllowed(nowVerdict)) {
             if (prev !== undefined) state.sessions[item.id] = { ...prev, revoked: nowVerdict };
             report.skipped.push({ id: item.id, reason: 'revoked-before-skip' });
@@ -347,7 +350,7 @@ export function createPollDomain(deps) {
         try {
           // 每次读取前后都用「当前规则 + 该会话 cwd」重新判定：
           // 轮询中途收紧规则时，尚未读取的会话不能按旧列表继续读。
-          const guard = () => isAllowed(decideAccess(rules, item.id, item.cwd));
+          const guard = () => isAllowed(decideAccess(currentRules(), item.id, item.cwd));
           const res = await syncSession(item.id, item.cwd, guard);
           if (res.skipped) {
             report.skipped.push({ id: item.id, reason: res.skipped });
@@ -397,7 +400,7 @@ export function createPollDomain(deps) {
       report.missingFromIndex = missingCount;
       // 撤销授权的旧记录：标记 revoked，不再对外展示
       for (const s of Object.values(state.sessions)) {
-        const verdict = decideAccess(rules, s.id, s.cwd);
+        const verdict = decideAccess(currentRules(), s.id, s.cwd);
         if (!isAllowed(verdict)) s.revoked = verdict;
         else delete s.revoked;
       }

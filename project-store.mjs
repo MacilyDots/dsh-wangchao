@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { normalizeFact, validateFactShape, validateChangeShape, makeChange, filterFactsForVisibility, FACT_KINDS, FACT_STATUSES } from './project-facts.mjs';
+import { normalizeDedupeKey } from './idea-capture.mjs';
 import { makeMark, summarizeRunCoverage, isFullAppliedRun, detectNewVersions, makeReminder, filterRemindersForVisibility, refreshAccessibility } from './project-increments.mjs';
 
 export const ENTITY_TYPES = new Set(['idea', 'research', 'project']);
@@ -13,6 +14,8 @@ export const LIFECYCLE_EVENT_KINDS = new Set(['shelved', 'rekindled', 'resumed',
 const RELATIONS = new Set(['primary', 'related']);
 const ORIGINS = new Set(['manual', 'suggested']);
 const LINK_STATES = new Set(['proposed', 'confirmed', 'rejected']);
+const IDEA_STATUSES = new Set(['candidate', 'ignored', 'confirmed', 'revised', 'promoted']);
+const IDEA_VOICES = new Set(['user_thought', 'model_suggestion', 'manual']);
 const obj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const nonempty = (v) => typeof v === 'string' && v.trim().length > 0;
 const validRev = (v) => Number.isSafeInteger(v) && v >= 0;
@@ -73,6 +76,20 @@ function validate(data) {
       }
     }
     projects.add(p.projectId);
+  }
+  // 灵感收件箱与项目/事实共用同一份 projects.json 和同一套授权边界。
+  if (data.ideas !== undefined) {
+    if (!Array.isArray(data.ideas)) fail('CORRUPT', 'ideas 不是数组');
+    const ideaIds = new Set();
+    for (const i of data.ideas) {
+      if (!obj(i) || !nonempty(i.ideaId) || ideaIds.has(i.ideaId)
+          || !nonempty(i.statement) || !IDEA_STATUSES.has(i.status)
+          || !IDEA_VOICES.has(i.voice) || !nonempty(i.createdAt)) fail('CORRUPT', '灵感条目无效');
+      if (i.sourceSessionId !== undefined && i.sourceSessionId !== null && !nonempty(i.sourceSessionId)) fail('CORRUPT', '灵感来源会话无效');
+      if (i.promotedProjectId !== undefined && i.promotedProjectId !== null && !nonempty(i.promotedProjectId)) fail('CORRUPT', '灵感关联项目无效');
+      if (i.promotedProjectId != null && !projects.has(i.promotedProjectId)) fail('CORRUPT', '灵感关联的项目不存在');
+      ideaIds.add(i.ideaId);
+    }
   }
   const links = new Set();
   for (const l of data.links) {
@@ -176,7 +193,7 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
     if (orphan) fail('RECOVERY_REQUIRED', `发现遗留临时文件 ${orphan}，需人工恢复`);
   };
   const emptyStore = () => ({ schemaVersion: 3, revision: 0, editRevision: 0,
-    projects: [], links: [], facts: [], changes: [],
+    projects: [], links: [], facts: [], changes: [], ideas: [],
     increments: { watermarks: {}, reminders: [] } });
   const read = ({ checkOrphans = true } = {}) => {
     // 读路径：有活锁时容忍进行中的 tmp，读取最近一次已提交的快照。
@@ -206,6 +223,8 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
       // 迁移后按 v3 规则重新校验：v2 数据可能带悬空 dependsOnFactId，必须一并按 v3 完整性拒绝。
       validate(data);
     }
+    // 灵感收件箱是 v3 内的可选扩展：老文件内存补齐，磁盘保持旧布局直到下一次成功写入。
+    if (data.ideas === undefined) data.ideas = [];
     return data;
   };
   const visible = (data) => {
@@ -218,6 +237,8 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
       // 统计只计算当前授权可见的事实，撤权后不得通过 factCount 泄露被隐藏事实的数量。
       projects: data.projects.map((p) => ({ ...p, factCount: facts.filter((f) => f.projectId === p.projectId).length })),
       links: data.links.filter((l) => permitted(l.sessionId)).map((l) => ({ ...l })),
+      // 灵感按来源会话实时判权：撤权后不得再显示来自该会话的候选。
+      ideas: (data.ideas ?? []).filter((i) => !i.sourceSessionId || permitted(i.sourceSessionId)).map((i) => ({ ...i })),
       facts,
       // P1-3：change 的目标事实可见，且其声明的跨事实依赖（dependsOnFactId）也必须可见，
       // 否则整条 change 隐藏（reason/before/after 可能含受限事实信息）。
@@ -348,6 +369,94 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
         reminders,
         // 水位只返回当前授权可见会话的条目，撤权后不泄露来源会话标识。
         watermarks: Object.fromEntries(Object.entries(wm).filter(([sid]) => permitted(sid)).map(([sid, v]) => [sid, { ...v }])) };
+    },
+
+    /**
+     * 灵感收件箱：与项目/事实共用 projects.json、磁盘锁、editRevision 与授权边界。
+     * 同一句灵感（归一化去重键相同）重复提交不产生新条目；显式忽略后允许重新捕获。
+     */
+    captureIdea({ statement, title, sourceSessionId, sourceSeq, voice = 'manual', actor = 'user', expectedRevision } = {}) {
+      if (!nonempty(statement)) fail('INVALID', '灵感内容不能为空');
+      if (!nonempty(actor)) fail('INVALID', '必须提供 actor');
+      if (!IDEA_VOICES.has(voice)) fail('INVALID', 'voice 无效');
+      if (sourceSessionId !== undefined && sourceSessionId !== null) requireAccess(sourceSessionId);
+      if (sourceSeq !== undefined && sourceSeq !== null && !Number.isSafeInteger(sourceSeq)) fail('INVALID', 'sourceSeq 必须是安全整数');
+      let created = null;
+      const view = mutate(expectedRevision, (data, rev) => {
+        if (sourceSessionId) requireAccess(sourceSessionId);
+        const text = statement.trim();
+        const dedupeKey = normalizeDedupeKey(text);
+        if ((data.ideas ?? []).some((x) => x.dedupeKey === dedupeKey && x.status !== 'ignored')) return false;
+        const now = new Date().toISOString();
+        created = {
+          ideaId: randomUUID(), statement: text, title: nonempty(title) ? title.trim() : '',
+          sourceSessionId: sourceSessionId ?? null,
+          sourceSeq: sourceSeq ?? null,
+          citationKey: sourceSessionId && Number.isSafeInteger(sourceSeq) ? `${sourceSessionId}#${sourceSeq}` : null,
+          voice, status: 'candidate', dedupeKey, actor, createdAt: now, updatedAt: now,
+        };
+        data.ideas.push(created);
+        return true;
+      }, sourceSessionId ? [sourceSessionId] : [], null, EDIT_OPTS);
+      return { ...view, ...(created ? { idea: { ...created } } : { duplicate: true }) };
+    },
+
+    listIdeas() { return (visible(read()).ideas ?? []).map((i) => ({ ...i })); },
+
+    /** 审阅灵感：忽略 / 确认 / 纠正文本。不自动调用任何模型。 */
+    reviewIdea({ ideaId, decision, statement, reason, actor = 'user', expectedRevision } = {}) {
+      if (!nonempty(ideaId) || !nonempty(actor)) fail('INVALID', 'ideaId/actor 不能为空');
+      if (!['ignored', 'confirmed', 'revised'].includes(decision)) fail('INVALID', 'decision 无效');
+      if (decision === 'revised' && !nonempty(statement)) fail('INVALID', '纠正灵感必须提供新文本');
+      return mutate(expectedRevision, (data, rev) => {
+        const it = (data.ideas ?? []).find((x) => x.ideaId === ideaId);
+        if (!it) fail('NOT_FOUND', '灵感不存在');
+        if (it.sourceSessionId) requireAccess(it.sourceSessionId);
+        if (decision === 'revised') {
+          it.statement = statement.trim();
+          it.dedupeKey = normalizeDedupeKey(it.statement);
+        }
+        it.status = decision;
+        it.reason = nonempty(reason) ? reason.trim() : null;
+        it.actor = actor;
+        it.updatedAt = new Date().toISOString();
+        return true;
+      }, [], (data) => {
+        const it = (data.ideas ?? []).find((x) => x.ideaId === ideaId);
+        return it?.sourceSessionId ? [it.sourceSessionId] : [];
+      }, EDIT_OPTS);
+    },
+
+    /** 纳入研究：同一事务内创建 research 实体（spark → exploring）并标记灵感来源。 */
+    promoteIdea({ ideaId, actor = 'user', expectedRevision } = {}) {
+      if (!nonempty(ideaId) || !nonempty(actor)) fail('INVALID', 'ideaId/actor 不能为空');
+      let createdId = null;
+      const view = mutate(expectedRevision, (data, rev) => {
+        const it = (data.ideas ?? []).find((x) => x.ideaId === ideaId);
+        if (!it) fail('NOT_FOUND', '灵感不存在');
+        if (it.sourceSessionId) requireAccess(it.sourceSessionId);
+        if (it.status === 'promoted') fail('CONFLICT', '该灵感已纳入研究');
+        const now = new Date().toISOString();
+        createdId = randomUUID();
+        data.projects.push({
+          projectId: createdId, title: nonempty(it.title) ? it.title : it.statement.slice(0, 48),
+          goal: it.statement, entityType: 'research', stage: 'exploring', lifecycle: 'active',
+          revision: rev, createdAt: now, updatedAt: now,
+          lifecycleEvents: [{
+            eventId: randomUUID(), kind: 'stage_changed', fromStage: 'spark', toStage: 'exploring',
+            fromLifecycle: 'active', toLifecycle: 'active', reason: '灵感纳入研究', actor, at: now,
+          }],
+        });
+        it.status = 'promoted';
+        it.promotedProjectId = createdId;
+        it.actor = actor;
+        it.updatedAt = now;
+        return true;
+      }, [], (data) => {
+        const it = (data.ideas ?? []).find((x) => x.ideaId === ideaId);
+        return it?.sourceSessionId ? [it.sourceSessionId] : [];
+      }, EDIT_OPTS);
+      return { ...view, projectId: createdId };
     },
 
     create({ title, goal = '', lifecycle = 'active', entityType, stage, aliases, expectedRevision } = {}) {

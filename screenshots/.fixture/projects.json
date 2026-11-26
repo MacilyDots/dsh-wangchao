@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 3,
+  "revision": 4,
+  "editRevision": 3,
+  "projects": [
+    {
+      "projectId": "f83aac39-ab1f-447e-b8e3-eddf9b67fcba",
+      "title": "Agent 王朝：跨会话状态与证据追踪",
+      "goal": "可信项目状态",
+      "lifecycle": "active",
+      "revision": 1,
+      "createdAt": "2026-11-26T13:36:37.090Z",
+      "updatedAt": "2026-11-26T13:36:37.090Z"
+    }
+  ],
+  "links": [
+    {
+      "projectId": "f83aac39-ab1f-447e-b8e3-eddf9b67fcba",
+      "sessionId": "s1",
+      "relation": "related",
+      "origin": "manual",
+      "status": "confirmed",
+      "revision": 2,
+      "createdAt": "2026-11-26T13:36:37.103Z",
+      "confirmedAt": "2026-11-26T13:36:37.103Z"
+    }
+  ],
+  "facts": [
+    {
+      "factId": "738914c9-d953-44f4-95d9-efae0946799b",
+      "projectId": "f83aac39-ab1f-447e-b8e3-eddf9b67fcba",
+      "kind": "decision",
+      "status": "candidate",
+      "statement": "采用确定性增量维护项目状态",
+      "evidence": [
+        {
+          "kind": "manual",
+          "by": "user",
+          "verifiedAt": null
+        }
+      ],
+      "recordedAt": "2026-11-26T13:36:37.109Z",
+      "origin": "manual",
+      "confirmedBy": null,
+      "supersededBy": null
+    }
+  ],
+  "changes": [
+    {
+      "changeId": "chg-2026-11-26T13:36:37.111Z-f2b6463f",
+      "projectId": "f83aac39-ab1f-447e-b8e3-eddf9b67fcba",
+      "kind": "created",
+      "factId": "738914c9-d953-44f4-95d9-efae0946799b",
+      "before": null,
+      "after": {
+        "kind": "decision",
+        "status": "candidate"
+      },
+      "reason": null,
+      "actor": "user",
+      "at": "2026-11-26T13:36:37.111Z"
+    }
+  ],
+  "ideas": [],
+  "increments": {
+    "watermarks": {
+      "f83aac39-ab1f-447e-b8e3-eddf9b67fcba": {
+        "s1": {
+          "marks": [
+            "2:s1v1"
+          ],
+          "lastVersionId": "v1",
+          "updatedAt": 1795700197116
+        }
+      }
+    },
+    "reminders": [
+      {
+        "reminderId": "rem-f53d54a8-277d-4eff-bcd8-0942af74db1b",
+        "projectId": "f83aac39-ab1f-447e-b8e3-eddf9b67fcba",
+        "sessionId": "s1",
+        "versionId": "v1",
+        "mark": "2:s1v1",
+        "foundAt": 1795700197116,
+        "status": "pending",
+        "reviewNote": null,
+        "reviewedAt": null,
+        "reviewer": null,
+        "sourceAccessible": true,
+        "coverage": "unknown"
+      }
+    ]
+  }
+}

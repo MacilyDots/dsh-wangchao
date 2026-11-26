@@ -452,6 +452,23 @@ await t('409 冲突保留项目名称草稿', async () => {
   await click('创建项目'); assert.equal(byClass('wc-new-proj')[0].value,'未保存的草稿');
   assert.match(textOf(),/版本冲突/); assert.equal(seed.list().projects.some(p=>p.title==='未保存的草稿'),false);
 });
+await t('灵感收件箱：捕捉、去重与纳入研究', async () => {
+  await click('手动刷新'); await settle();
+  const kind = byClass('wc-new-kind')[0]; assert.ok(kind, '缺少新建类型下拉');
+  kind.value = 'idea'; for (const fn of kind._listeners.get('input') ?? []) fn({ target: kind }); await settle();
+  input('wc-new-proj', '研究一下上下文退化'); await settle();
+  await click('记录灵感');
+  const ideas = seed.listIdeas();
+  assert.ok(ideas.some(i => i.statement === '研究一下上下文退化' && i.status === 'candidate'), '灵感必须持久化到收件箱');
+  assert.match(textOf(), /灵感收件箱/);
+  assert.match(textOf(), /待整理/);
+  input('wc-new-proj', '研究一下上下文退化。'); await settle();
+  await click('记录灵感');
+  assert.equal(seed.listIdeas().filter(i => i.statement.includes('研究一下上下文退化')).length, 1, '归一化去重后不应产生第二条');
+  await click('纳入研究');
+  assert.ok(seed.list().projects.some(p => p.entityType === 'research' && p.stage === 'exploring'
+    && p.lifecycleEvents && p.lifecycleEvents.some(e => e.kind === 'stage_changed')), '纳入研究必须原子创建研究实体并留事件');
+});
 await t('撤权并刷新后会话事实提醒均不可见', async () => {
   const id=seed.list().projects.find(p=>p.title==='首个项目').projectId;
   seed.addFact({projectId:id,kind:'risk',statement:'受限会话事实',origin:'manual',actor:'user',evidence:[{kind:'session_ref',sessionId:'session-s1',seq:7}],expectedRevision:seed.list().editRevision});

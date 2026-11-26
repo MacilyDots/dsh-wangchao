@@ -68,6 +68,9 @@ export function buildProjectRoutes({ projectHttp, stateIssue = () => null, jsonR
     return respond(await projectHttp.handle('create', body));
   }));
 
+  // 灵感收件箱：列表只读；捕捉/审阅/纳入研究都是写操作（走同一授权与磁盘锁）。
+  define('/project/ideas', ['GET'], async () => withState(async () => respond(await projectHttp.handle('listIdeas', {}))));
+
   const simplePosts = [
     ['/project/update', 'update'],
     ['/project/transition', 'transitionResearch'],
@@ -77,6 +80,9 @@ export function buildProjectRoutes({ projectHttp, stateIssue = () => null, jsonR
     ['/project/link/review', 'linkReview'],
     ['/project/fact', 'addFact'],
     ['/project/reminder/review', 'reminderReview'],
+    ['/project/idea/capture', 'captureIdea'],
+    ['/project/idea/review', 'reviewIdea'],
+    ['/project/idea/promote', 'promoteIdea'],
   ];
   for (const [pathName, action] of simplePosts) {
     define(pathName, ['POST'], async (request) => withState(async () => {

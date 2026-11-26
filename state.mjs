@@ -20,6 +20,9 @@ import { normalizeRoles, attachRoleAlias } from './roles.mjs';
 /** 采集规则的四个键；缺一个就是权限边界不完整。 */
 export const RULE_KEYS = ['allowSessions', 'excludeSessions', 'allowCwds', 'excludeCwds'];
 
+/** 新格式：override 中「字段存在」即显式设定，空数组表示该项授权集合为空。 */
+export const RULE_FORMAT_EXPLICIT = 2;
+
 /**
  * 把任意输入归一成合法规则集（去重、去空白、缺项补空数组）。
  * @param {any} r
@@ -33,6 +36,54 @@ export function normalizeRuleSet(r) {
     out[k] = [...new Set(v.map((/** @type {unknown} */ x) => String(x ?? '').trim()).filter(Boolean))];
   }
   return out;
+}
+
+/**
+ * 规则合并：字段不存在 = 继承配置；显式空数组 = 该项授权集合为空；非空 = 覆盖。
+ *
+ * 旧格式（没有 rulesOverrideFormat=2 的历史数据）的空数组过去被当作「未设置」，
+ * 为了不让老实例在升级后突然收紧，迁移时把这些空字段删除，等价于「未设置」。
+ * 新格式只认字段是否存在，不再用长度猜意图。
+ *
+ * @param {any} base 配置文件基线
+ * @param {any} override 状态文件里的覆盖值
+ * @param {any} format 覆盖值格式版本
+ * @returns {{ allowSessions: string[], excludeSessions: string[], allowCwds: string[], excludeCwds: string[] }}
+ */
+export function mergeRules(base, override, format) {
+  const b = normalizeRuleSet(base);
+  if (!override || typeof override !== 'object' || Array.isArray(override)) return b;
+  const o = normalizeRuleSet(override);
+  const explicit = Number(format) === RULE_FORMAT_EXPLICIT;
+  /** @type {any} */
+  const out = {};
+  for (const k of RULE_KEYS) {
+    const present = Object.prototype.hasOwnProperty.call(override, k) && Array.isArray(override[k]);
+    // 旧格式把空数组当未设置；新格式把空数组当显式空集。
+    const applies = explicit ? present : (present && o[k].length > 0);
+    out[k] = applies ? o[k] : b[k];
+  }
+  return out;
+}
+
+/**
+ * 旧格式迁移：打上显式格式标记。
+ *
+ * 旧数据无法区分「用户主动清空」与「历史上被 UI 顺手写入的空数组」。
+ * 授权范围不明确时按 fail-closed 处理：空数组保留为「显式空集」，
+ * 不用「继承配置基线」扩大采集范围。用户若本意是继承，可点「恢复配置文件基线」。
+ * @param {any} s
+ * @returns {any}
+ */
+export function migrateRuleOverride(s) {
+  if (!s || typeof s !== 'object' || s.rulesOverride === undefined || s.rulesOverride === null) return s;
+  if (Number(s.rulesOverrideFormat) === RULE_FORMAT_EXPLICIT) return s;
+  return {
+    ...s,
+    rulesOverride: normalizeRuleSet(s.rulesOverride),
+    rulesOverrideFormat: RULE_FORMAT_EXPLICIT,
+    rulesMigratedAt: Date.now(),
+  };
 }
 
 /** 全新的空状态（首次启动或损坏后的占位）。 */
@@ -67,10 +118,16 @@ export function validateStateShape(s) {
   if (!s.sessions || typeof s.sessions !== 'object' || Array.isArray(s.sessions)) {
     return '缺少 sessions 对象或类型错误';
   }
+  if (s.rulesOverrideFormat !== undefined && Number(s.rulesOverrideFormat) !== RULE_FORMAT_EXPLICIT) {
+    return `未知的规则格式 ${JSON.stringify(s.rulesOverrideFormat)}（当前只支持 ${RULE_FORMAT_EXPLICIT}）`;
+  }
   if (s.rulesOverride !== undefined && s.rulesOverride !== null) {
     const r = s.rulesOverride;
     if (typeof r !== 'object' || Array.isArray(r)) return 'rulesOverride 不是对象';
     for (const k of RULE_KEYS) {
+      // 新格式允许字段缺失（缺失=继承配置），但凡出现的值必须是数组。
+      // 旧格式必须四个字段齐全，否则 loadStateDetailed 无法按历史语义迁移。
+      if (r[k] === undefined && Number(s.rulesOverrideFormat) === RULE_FORMAT_EXPLICIT) continue;
       if (!Array.isArray(r[k])) return `rulesOverride.${k} 不是数组（权限字段不完整）`;
     }
   }
@@ -126,7 +183,10 @@ export function loadStateDetailed(file) {
     }
     // 合并：s 覆盖默认字段，但 roles 由 normalizeRoles 统一归一（含旧 chief 迁移）；
     // 最后 attachRoleAlias 把 chief 挂成 roles.chief 的非枚举别名。
-    const merged = { ...emptyState(), ...s, version: 2, roles: normalizeRoles({ ...s, roles: s.roles ?? null }) };
+    // 旧 rulesOverride 的空数组历史上被当作「未设置」。迁移时删除空字段并打上格式标记，
+    // 之后「字段存在即生效」，显式清空才是真正的空授权集。
+    const migrated = migrateRuleOverride(s);
+    const merged = { ...emptyState(), ...migrated, version: 2, roles: normalizeRoles({ ...s, roles: s.roles ?? null }) };
     return { state: attachRoleAlias(merged), status: 'ok' };
   } catch (e) {
     return { state: emptyState(), status: 'corrupt', error: '解析失败：' + String(/** @type {Error} */ (e)?.message ?? e).slice(0, 200) };
@@ -192,8 +252,10 @@ export function createStateDomain(ctx, config) {
     return undefined;
   };
 
-  const pollIntervalMs = Math.max(5000, Number(cfg.pollIntervalMs ?? 30000));
-  const maxPerPoll = Math.max(1, Number(cfg.maxSessionsPerPoll ?? 10));
+  const pollIntervalRaw = Number(cfg.pollIntervalMs ?? 30000);
+  const pollIntervalMs = Number.isFinite(pollIntervalRaw) ? Math.max(5000, pollIntervalRaw) : 30000;
+  const maxPerPollRaw = Number(cfg.maxSessionsPerPoll ?? 10);
+  const maxPerPoll = Number.isFinite(maxPerPollRaw) ? Math.max(1, Math.trunc(maxPerPollRaw)) : 10;
   const maxParallelTasks = Math.min(MAX_PARALLEL_TASKS, Math.max(1,
     Math.trunc(Number.isFinite(Number(cfg.maxParallelTasks)) ? Number(cfg.maxParallelTasks) : DEFAULT_MAX_PARALLEL_TASKS)));
 
@@ -264,21 +326,14 @@ export function createStateDomain(ctx, config) {
     ? { ok: false, error: '状态文件不可读，拒绝覆盖（等待人工恢复）：' + stateLoadIssue }
     : saveState(stateFile, state));
 
-  // 规则的当前值仍由 apply() 持有（saveRules/resetRules 会整体替换它），
-  // 这里只交出初始值，避免出现两份副本。
-  // 规则 = 配置文件基线 + 面板 override，按字段合并：override 里非空的字段优先，
-  // 空数组视为「该字段未设置」而回落到配置基线。否则一次面板保存留下的空 allowCwds
-  // 会永久压制配置里的放行目录，表现为「怎么改配置都不采集」。
+  // 规则 = 配置文件基线 + 面板 override，按字段合并：
+  // · 字段不存在：继承配置基线；
+  // · 显式空数组：该项授权集合为空（用户主动清空，不再回落配置）；
+  // · 非空数组：使用覆盖值；
+  // · exclude* 的拒绝优先级由下方判权链保证；
+  // · 恢复默认走 resetRules 删除 override，而不是用空数组表达。
   const baseRules = normalizeRuleSet(cfgRules);
-  const overRules = state.rulesOverride ? normalizeRuleSet(state.rulesOverride) : null;
-  const initialRules = overRules
-    ? {
-        allowSessions: overRules.allowSessions.length ? overRules.allowSessions : baseRules.allowSessions,
-        excludeSessions: overRules.excludeSessions.length ? overRules.excludeSessions : baseRules.excludeSessions,
-        allowCwds: overRules.allowCwds.length ? overRules.allowCwds : baseRules.allowCwds,
-        excludeCwds: overRules.excludeCwds.length ? overRules.excludeCwds : baseRules.excludeCwds,
-      }
-    : baseRules;
+  const initialRules = mergeRules(baseRules, state.rulesOverride, state.rulesOverrideFormat);
 
   return {
     cfg, cfgRules, dshHome, stateDir, stateFile, pendingMark,
@@ -287,6 +342,7 @@ export function createStateDomain(ctx, config) {
     allowedRealRoutes, execProvider, execModel, execMaxTokens, execConfigError,
     buildExecAgentOptions,
     state, stateLoadIssue: /** @type {string | null} */ (stateLoadIssue), stateCorruptBackup, persistState,
+    baseRules,
     initialRules,
   };
 }

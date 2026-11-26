@@ -80,7 +80,7 @@ window.__ModuleLoader__.load({
     const lifecycleEventLabel = (e) => LIFECYCLE_EVENT_LABELS[e] || String(e || '未知');
     const factKindLabel = (k) => FACT_KIND_LABELS[k] || String(k || '未知');
     // 显示层统一中文化：所有枚举在界面上只出现中文，英文原名仅保留在后端契约与接口里。
-    const FACT_STATUS_LABELS = { candidate: '候选', confirmed: '已确认', rejected: '已否决', superseded: '已被取代', revised: '已纠正' };
+    const FACT_STATUS_LABELS = { candidate: '候选', confirmed: '已确认', disputed: '已争议', superseded: '已被取代' };
     const LINK_STATUS_LABELS = { proposed: '待确认', candidate: '待确认', confirmed: '已确认', rejected: '已拒绝' };
     const REMINDER_STATUS_LABELS = { pending: '待审阅', reviewed: '已审阅', dismissed: '已忽略' };
     const PROJECT_LIFECYCLE_LABELS = { active: '进行中', paused: '已暂停', archived: '已归档', done: '已完成', blocked: '受阻' };
@@ -901,8 +901,13 @@ window.__ModuleLoader__.load({
           p.err ? h('div', { className: 'ldr-err' }, p.err) : h('div', { className: 'ldr-empty' }, '正在读取规则…'));
       }
       const sourceText = rs.source === 'override'
-        ? '当前使用面板保存的规则（覆盖配置文件基线）'
-        : '当前使用配置文件基线';
+        ? '当前使用面板保存的规则（按字段覆盖配置文件基线；留空的字段表示该项明确不授权）'
+        : '当前使用配置文件基线（尚未保存面板规则）';
+      const anyExplicitEmpty = rs.source === 'override' && (function () {
+        const ex = Array.isArray(rs.explicitFields) ? rs.explicitFields : null;
+        if (!ex) return false;
+        return ex.some(function (k) { return Array.isArray(rs.rules && rs.rules[k]) && rs.rules[k].length === 0; });
+      })();
       const field = function (key, label, hint) {
         return h('div', { className: 'ldr-field', key: key },
           h('label', { className: 'ldr-label' }, label),
@@ -963,13 +968,16 @@ window.__ModuleLoader__.load({
         head, intro, diagBlock,
         p.err ? h('div', { className: 'ldr-err' }, p.err) : null,
         h('div', { className: 'ldr-note' }, sourceText + (rs.updatedAt ? ' · 保存于 ' + timeText(rs.updatedAt) : '')),
-        field('allowCwds', '允许的目录（allowCwds）', '每行一个目录；会话 cwd 在任一目录下才可能被采集'),
+        anyExplicitEmpty
+          ? h('div', { className: 'ldr-warn' }, '注意：下方存在留空的允许项。保存后该允许集合为空（明确不授权），不会回落到配置文件基线；要恢复基线请点「恢复配置文件基线」。')
+          : null,
+        field('allowCwds', '允许的目录（allowCwds）', '每行一个目录；会话 cwd 在任一目录下才可能被采集。留空并保存 = 明确不按目录允许'),
         field('excludeCwds', '排除的目录（excludeCwds）', '每行一个目录；优先级高于允许目录'),
-        field('allowSessions', '允许的会话（allowSessions）', '每行一个会话 id；仅对未被排除目录/排除会话覆盖的会话生效（排除优先，不会覆盖排除规则）'),
+        field('allowSessions', '允许的会话（allowSessions）', '每行一个会话 id；仅对未被排除目录/排除会话覆盖的会话生效（排除优先，不会覆盖排除规则）。留空并保存 = 明确不按会话允许'),
         field('excludeSessions', '排除的会话（excludeSessions）', '每行一个会话 id；优先级最高'),
         h('div', { className: 'ldr-row', style: { marginTop: 4 } },
           h('button', { className: 'ldr-primary', disabled: p.saving, onClick: p.onSave }, p.saving ? '保存中…' : '保存规则'),
-          h('button', { className: 'ldr-danger', disabled: p.saving, onClick: p.onReset }, '恢复配置文件基线')),
+          h('button', { className: 'ldr-danger', disabled: p.saving, onClick: p.onReset }, '恢复配置文件基线（删除面板覆盖）')),
         h('div', { className: 'ldr-h', style: { marginTop: 20 } }, '候选会话'),
         candBlock());
     }
@@ -1379,22 +1387,27 @@ window.__ModuleLoader__.load({
       }, [messages.length, sendMsg, streamNote]);
       const [sending, setSending] = React.useState(false);
       const [hanlinBusy, setHanlinBusy] = React.useState(false);
+      const hanlinBusyRef = React.useRef(false);
       const [hanlinMsg, setHanlinMsg] = React.useState(null);
       const [hanlinOpen, setHanlinOpen] = React.useState(false);
-      const runHanlinDigest = function () {
-        if (hanlinBusy) return;
+      const runHanlinDigest = function (opts) {
+        // 渲染期 state 可能在同一帧读到 false（连点两次），用 ref 做真正的单飞。
+        if (hanlinBusyRef.current) return;
+        hanlinBusyRef.current = true;
         setHanlinBusy(true);
         setHanlinMsg('生成中…');
+        const force = !!(opts && opts.force === true);
+        const requestId = 'wc-' + Date.now() + '-' + Math.random().toString(16).slice(2, 10);
         fetch('/api/dsh-wangchao/hanlin/digest', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ force: false }),
+          body: JSON.stringify({ force, requestId }),
         }).then(function (r) { return r.json(); }).then(function (j) {
           if (!j || j.ok !== true) { setHanlinMsg('生成失败：' + String((j && (j.error && (j.error.message || j.error || j.code)) || '未知错误'))); return; }
           setHanlinMsg(j.cached ? '已复用今日奏折' : '今日奏折已生成');
           loadBar();
         }).catch(function (e) { setHanlinMsg('生成请求失败：' + String((e && e.message) || e)); })
-          .then(function () { setHanlinBusy(false); });
+          .then(function () { hanlinBusyRef.current = false; setHanlinBusy(false); });
       };
       const [openMsg, setOpenMsg] = React.useState(null);
       // T4-D：项目列表与详情（复用已认证 HTTP 接口；撤权/失败均显示明确状态）
@@ -1412,7 +1425,7 @@ window.__ModuleLoader__.load({
       const [opError, setOpError] = React.useState(false);
       const [opBusy, setOpBusy] = React.useState(false);
       const [opScope, setOpScope] = React.useState('left');
-      const [draft, setDraft] = React.useState({ sessionId: '', factText: '', factKind: 'decision', newTitle: '', newKind: 'project', aliasText: null, stagePick: '', transitionReason: '' });
+      const [draft, setDraft] = React.useState({ sessionId: '', factText: '', factKind: 'decision', claimKind: 'user_statement', newTitle: '', newKind: 'project', aliasText: null, stagePick: '', transitionReason: '' });
       const [projRev, setProjRev] = React.useState(0);
       // RRP：恢复包只展示与复制，不自动新建会话；检索为只读，结果带覆盖范围与权限边界。
       const [pack, setPack] = React.useState(null);
@@ -1426,6 +1439,14 @@ window.__ModuleLoader__.load({
       const [searchBusy, setSearchBusy] = React.useState(false);
       const [searchErr, setSearchErr] = React.useState(null);
       const searchGenRef = React.useRef(0);
+      // P1-1 灵感收件箱：与项目共用 editRevision 与授权边界，不新建第二套工作台。
+      const [ideas, setIdeas] = React.useState(null);
+      const [ideaDraft, setIdeaDraft] = React.useState('');
+      const [ideaSource, setIdeaSource] = React.useState('');
+      const [ideaErr, setIdeaErr] = React.useState(null);
+      const [ideaMsg, setIdeaMsg] = React.useState(null);
+      const [ideaBusy, setIdeaBusy] = React.useState(false);
+      const ideasGenRef = React.useRef(0);
       const [remSum, setRemSum] = React.useState(null);
       const [remFact, setRemFact] = React.useState(EMPTY_REM_FACT);
       const [remNotes, setRemNotes] = React.useState({});
@@ -1495,8 +1516,29 @@ window.__ModuleLoader__.load({
 
       React.useEffect(function () {
         loadProjects();
-        return function () { projListGenRef.current += 1; };
+        loadIdeas();
+        return function () { projListGenRef.current += 1; ideasGenRef.current += 1; };
       }, []);
+
+      // 灵感收件箱：只读列表，来源会话撤权后服务端已过滤；客户端不缓存判定结论。
+      function loadIdeas() {
+        const gen = ++ideasGenRef.current;
+        return fetch('/api/dsh-wangchao/project/ideas', { headers: { accept: 'application/json' } })
+          .then(function (r) { return r.json().catch(function () { return null; }).then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); })
+          .then(function (res) {
+            if (gen !== ideasGenRef.current) return false;
+            const good = res.ok && res.body && res.body.ok !== false && Array.isArray(res.body.ideas);
+            if (good) { setIdeas(res.body.ideas); setIdeaErr(null); }
+            // 非项目接口（例如独立页面假响应）没有 ideas 字段：不写入 state，避免无意义重渲染。
+            else if (res.status >= 400) setIdeaErr((res.body && res.body.error) ? res.body.error : '灵感收件箱不可用');
+            return good;
+          })
+          .catch(function () {
+            if (gen !== ideasGenRef.current) return false;
+            setIdeas([]); setIdeaErr('灵感收件箱读取失败');
+            return false;
+          });
+      }
 
       const loadBar = function () {
         const gen = ++barGenRef.current;
@@ -2077,6 +2119,7 @@ window.__ModuleLoader__.load({
             const succeeded = !!(res.ok && res.body && res.body.ok !== false);
             if (gen !== opGenRef.current) {
               if (succeeded) loadProjects();
+              loadIdeas();
               return false;
             }
             setOpBusy(false);
@@ -2121,6 +2164,7 @@ window.__ModuleLoader__.load({
                 });
               }
               loadProjects();
+              loadIdeas();
               if (submitPid && projOpenRef.current === submitPid) loadDetail(submitPid);
               return true;
             }
@@ -2289,6 +2333,13 @@ window.__ModuleLoader__.load({
         h('input', { className: 'wc-input wc-inline-input wc-new-proj', value: draft.newTitle || '', placeholder: newKind === 'idea' ? '灵感一句话' : (newKind === 'research' ? '研究题目' : '项目名称'),
           onChange: function (e) { const v = e.target.value; setDraft(function (prev) { return Object.assign({}, prev, { newTitle: v }); }); } }),
         h('button', { className: 'ldr-btn', disabled: opBusy || !(draft.newTitle || '').trim(), onClick: function () {
+          if (newKind === 'idea') {
+            postProject('/api/dsh-wangchao/project/idea/capture', {
+              statement: draft.newTitle.trim(), title: '', expectedRevision: projRev, voice: 'manual',
+              sourceSessionId: String(ideaSource || '').trim() || null,
+            }, { successMsg: '灵感已收入收件箱（待整理）', clearField: 'newTitle', scope: 'left' });
+            return;
+          }
           const body = { title: draft.newTitle.trim(), expectedRevision: projRev, entityType: newKind };
           if (newKind === 'idea') body.stage = 'spark';
           postProject('/api/dsh-wangchao/project', body, {
@@ -2337,6 +2388,19 @@ window.__ModuleLoader__.load({
             h('span', null, (effective.label || id) + '：'),
             h('span', { className: 'wc-status ' + view.cls }, view.text),
             effective.capabilityBoundary ? h('span', { className: 'ldr-dim' }, effective.capabilityBoundary) : null),
+          isChief ? h('div', { className: 'ldr-dim wc-chief-duty', style: { marginTop: 4 } }, '首辅是只读参谋：负责巡查、分析、问答和提出建议，不负责真实执行，也不能修改已锁定事实。') : null,
+          isChief ? h('div', { className: 'ldr-dim wc-chief-state', style: { marginTop: 4 } },
+            '已召见：' + (chiefOpen ? '是' : '否')
+            + ' · 本进程守卫：' + (chief && chief.readonlyInstalled ? '已验证' : '未验证（需重新召见）')
+            + ' · 可发送：' + (chief && chief.conversationEnabled ? '是' : '否')
+            + ' · 状态：' + (function () {
+                const code = chief && chief.blockedCode ? String(chief.blockedCode) : '';
+                if (!chiefOpen && !code) return '未召见';
+                if (code === 'retired-by-rules' || code === 'superseded-chief') return '已退休';
+                if (ov && ov.censorate && ov.censorate.freeze && ov.censorate.freeze.frozen === true) return '已冻结（只读对话仍可）';
+                if (code) return '权限不足：' + code;
+                return '可用';
+              })()) : null,
           isChief ? h('div', { className: 'ldr-row', style: { marginTop: 6, flexWrap: 'wrap' } },
             h('button', {
               className: 'ldr-primary', disabled: props.chiefBusy === true || ov.observeOnly === true || !props.onSummonChief,
@@ -2407,7 +2471,41 @@ window.__ModuleLoader__.load({
             refreshAll(centerMode === 'project' && !!projOpenRef.current);
           } }, '刷新项目')),
         projItems,
-        newProjectBox);
+        newProjectBox,
+        h('div', { className: 'wc-proj-new', style: { marginTop: 10 } },
+          h('h4', null, '灵感收件箱'),
+          h('div', { className: 'ldr-dim' }, '来源会话（可选，须为当前授权会话；留空表示手工记录）：'),
+          h('input', { className: 'wc-input wc-inline-input wc-idea-source', value: ideaSource, placeholder: '会话 id（可留空）',
+            onChange: function (e) { setIdeaSource(e.target.value); } }),
+          ideaErr ? h('div', { className: 'ldr-warn' }, ideaErr) : null,
+          ideaMsg ? h('div', { className: 'ldr-note' }, ideaMsg) : null,
+          (ideas && ideas.length > 0)
+            ? ideas.slice(0, 12).map(function (it) {
+                const st = it.status === 'candidate' ? '待整理' : it.status === 'ignored' ? '已忽略'
+                  : it.status === 'confirmed' ? '已确认' : it.status === 'revised' ? '已纠正' : '已纳入研究';
+                const voice = it.voice === 'user_thought' ? '用户想法' : it.voice === 'model_suggestion' ? '模型建议' : '手工记录';
+                return h('div', { key: it.ideaId, className: 'ldr-card-line wc-idea-row' },
+                  h('div', null, it.statement),
+                  h('div', { className: 'ldr-dim' }, voice + ' · ' + st + (it.citationKey ? ' · ' + it.citationKey : '')),
+                  h('div', { className: 'ldr-row', style: { marginTop: 4 } },
+                    (it.status === 'candidate' || it.status === 'revised' || it.status === 'confirmed')
+                      ? h('button', { className: 'ldr-btn', disabled: opBusy, onClick: function () {
+                          postProject('/api/dsh-wangchao/project/idea/promote',
+                            { ideaId: it.ideaId, expectedRevision: projRev },
+                            { successMsg: '已纳入研究，请在项目列表打开', scope: 'left' });
+                        } }, '纳入研究') : null,
+                    it.status === 'candidate' ? h('button', { className: 'ldr-btn', disabled: opBusy, onClick: function () {
+                      postProject('/api/dsh-wangchao/project/idea/review',
+                        { ideaId: it.ideaId, decision: 'confirmed', expectedRevision: projRev },
+                        { successMsg: '灵感已确认', scope: 'left' });
+                    } }, '确认') : null,
+                    it.status !== 'promoted' && it.status !== 'ignored' ? h('button', { className: 'ldr-btn', disabled: opBusy, onClick: function () {
+                      postProject('/api/dsh-wangchao/project/idea/review',
+                        { ideaId: it.ideaId, decision: 'ignored', expectedRevision: projRev },
+                        { successMsg: '灵感已忽略', scope: 'left' });
+                    } }, '忽略') : null));
+              })
+            : h('div', { className: 'ldr-dim' }, ideas ? '收件箱为空：上方记录一条灵感' : '收件箱读取中…')));
 
       // T4-D2：项目工作区（中栏），所有操作写接口用 editRevision；409 不自动重试、保留草稿。
       const renderProjectWorkspace = function () {
@@ -2455,6 +2553,17 @@ window.__ModuleLoader__.load({
           packMsg ? h('div', { className: 'wc-op-msg wc-op-ok' }, packMsg) : null,
           pack ? h('div', null,
             h('div', { className: 'ldr-dim' }, packSummary),
+            (Array.isArray(pack.coverageGaps) && pack.coverageGaps.length)
+              ? h('div', { className: 'ldr-warn' }, '覆盖缺口：',
+                  pack.coverageGaps.map(function (g, i) { return h('div', { key: 'g' + i, className: 'ldr-dim' }, '· ' + g); }))
+              : null,
+            (Array.isArray(pack.lineages) && pack.lineages.length)
+              ? h('div', { className: 'ldr-dim' }, '会话血缘：',
+                  pack.lineages.map(function (e, i) {
+                    return h('div', { key: 'l' + i, className: 'ldr-dim' },
+                      '· ' + e.sourceSessionId + ' → ' + e.derivedSessionId + (e.kind ? '（' + e.kind + '）' : ''));
+                  }))
+              : null,
             h('pre', null, pack.markdown)) : null) : null;
 
         const transition = function (patch, msg, kind) {
@@ -2484,7 +2593,15 @@ window.__ModuleLoader__.load({
             className: 'wc-input wc-inline-input wc-transition-reason', value: draft.transitionReason || '', placeholder: '阶段/搁置说明（可选）',
             onChange: function (e) { const v = e.target.value; setDraft(function (prev) { return Object.assign({}, prev, { transitionReason: v }); }); },
           }),
-          h('span', { className: 'ldr-dim' }, '生命周期事件 ' + lifecycleEvents.length));
+          h('div', { className: 'wc-lifecycle-events' },
+            h('span', { className: 'ldr-dim' }, '生命周期事件 ' + lifecycleEvents.length),
+            lifecycleEvents.slice(-6).map(function (ev) {
+              const when = ev.at ? String(ev.at).slice(0, 16).replace('T', ' ') : '';
+              const path = (ev.fromStage || ev.fromLifecycle || '未标注') + ' → ' + (ev.toStage || ev.toLifecycle || '未标注');
+              return h('div', { key: ev.eventId, className: 'ldr-dim wc-lifecycle-event' },
+                lifecycleEventLabel(ev.kind) + ' · ' + path + (when ? ' · ' + when : '')
+                + (ev.reason ? ' · ' + ev.reason : '') + (ev.actor ? ' · ' + ev.actor : ''));
+            })));
         const aliasesPanel = h('div', { className: 'ldr-row', style: { marginTop: 6, flexWrap: 'wrap' } },
           h('span', { className: 'ldr-dim' }, '别名（逗号分隔，全量覆盖）：'),
           h('input', {
@@ -2553,9 +2670,13 @@ window.__ModuleLoader__.load({
             }).join('、') || '无证据';
             return h('div', { key: f.factId, className: 'ldr-card-line wc-fact-card' + (locked ? ' wc-fact-locked' : '') },
               h('div', null,
-                '[' + factKindLabel(f.kind) + '/' + factStatusLabel(st) + '] ' + f.statement,
+                '[' + factKindLabel(f.kind) + '/' + factStatusLabel(st)
+                  + (f.claimKind ? '/' + claimKindLabel(f.claimKind) : '') + '] ' + f.statement,
                 locked ? h('span', { className: 'wc-lock-badge' }, '[已锁定]') : null),
               h('div', { className: 'ldr-dim' }, '证据：' + evSummary),
+              f.disputeReason ? h('div', { className: 'ldr-dim' }, '争议理由：' + f.disputeReason) : null,
+              f.supersededBy ? h('div', { className: 'ldr-dim' }, '已被事实 ' + f.supersededBy + ' 取代') : null,
+              f.confirmedBy ? h('div', { className: 'ldr-dim' }, '确认人：' + f.confirmedBy) : null,
               locked ? h('div', { className: 'ldr-dim' }, '用户已锁定：确认 / 否决 / 纠正 / 取代均暂停，需先解锁') : null,
               st === 'superseded' ? h('div', { className: 'ldr-dim' }, '已被取代（只读）') : h('div', null,
                 h('div', { className: 'ldr-row', style: { flexWrap: 'wrap' } },
@@ -2615,10 +2736,14 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ldr-row', style: { marginTop: 6 } },
             h('select', { className: 'wc-input wc-inline-input', value: draft.factKind, onChange: function (e) { const v = e.target.value; setDraft(function (prev) { return Object.assign({}, prev, { factKind: v }); }); } },
               FACT_KINDS.map(function (k) { return h('option', { key: k, value: k }, factKindLabel(k)); })),
-            h('input', { className: 'wc-input wc-inline-input wc-fact-input', value: draft.factText, placeholder: '录入纯人工事实',
+            h('select', { className: 'wc-input wc-inline-input wc-claim-kind', value: draft.claimKind || 'user_statement', 'aria-label': '主张类型',
+              onChange: function (e) { const v = e.target.value; setDraft(function (prev) { return Object.assign({}, prev, { claimKind: v }); }); } },
+              ['user_statement', 'model_inference', 'evidence_backed'].map(function (k) { return h('option', { key: k, value: k }, claimKindLabel(k)); })),
+            h('input', { className: 'wc-input wc-inline-input wc-fact-input', value: draft.factText, placeholder: '录入事实（人工声明 / 模型推断 / 证据支撑）',
               onChange: function (e) { const v = e.target.value; setDraft(function (prev) { return Object.assign({}, prev, { factText: v }); }); } }),
             h('button', { className: 'ldr-btn', disabled: opBusy || !draft.factText.trim(), onClick: function () {
               postProject('/api/dsh-wangchao/project/fact', { projectId: pid, kind: draft.factKind, statement: draft.factText.trim(), origin: 'manual',
+                claimKind: draft.claimKind || 'user_statement',
                 evidence: [{ kind: 'manual', by: 'user' }], expectedRevision: needRev() }, { successMsg: '已录入候选事实', clearField: 'fact' });
             } }, '录入事实')),
 
@@ -3136,7 +3261,7 @@ window.__ModuleLoader__.load({
               h('div', { className: 'wc-evidence-head' },
                 h('span', null, '翰林院今日奏折'),
                 h('div', { className: 'ldr-row' },
-                  h('button', { type: 'button', className: 'ldr-btn', disabled: hanlinBusy, onClick: runHanlinDigest }, hanlinBusy ? '生成中…' : '重新生成'),
+                  h('button', { type: 'button', className: 'ldr-btn', disabled: hanlinBusy, onClick: function () { runHanlinDigest({ force: true }); } }, hanlinBusy ? '生成中…' : '重新生成'),
                   h('button', { type: 'button', className: 'ldr-toggle', onClick: function () { setHanlinOpen(false); } }, '关闭'))),
               hanlinDrawerMeta ? h('div', { className: 'ldr-dim', style: { marginTop: 8 } }, hanlinDrawerMeta) : null,
               h('div', { className: 'wc-evidence-body' }, hanlinDrawerText)))

@@ -74,7 +74,7 @@ test('F3 残留 epoch tmp → 打开 fail closed（ORPHAN_TMP），并释放锁'
   assert.ok(!fs.existsSync(lockFile(dir)), '打开失败必须释放锁');
 });
 
-test('F4 陈旧锁（持锁进程已退出）→ 自动接管，留审计，epoch 不倒退', async () => {
+test('F4 陈旧锁（持锁进程已退出）→ 原子接管，留审计，epoch 单调 +1', async () => {
   const dir = tmpState();
   // 造一个真实"已经退出"的 pid：起子进程再等它结束
   const child = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' });
@@ -85,15 +85,21 @@ test('F4 陈旧锁（持锁进程已退出）→ 自动接管，留审计，epoc
 
   const fence = createWriterEpochFence({ stateDir: dir, settleAttempt: noop });
   assert.equal(fence.lockHeld, true, '接管后应持有写锁');
-  assert.equal(fence.epoch, 7, 'epoch 必须沿用磁盘值，不能因接管而重置');
+  assert.equal(fence.epoch, 8, '接管后 epoch 必须单调 +1，旧写者才能被 fencing');
+  assert.ok(fs.existsSync(lockFile(dir)));
+  const takenLock = JSON.parse(fs.readFileSync(lockFile(dir), 'utf8'));
+  assert.equal(takenLock.epoch, 8, '新锁必须带接管后的 epoch');
+  assert.equal(takenLock.pid, process.pid);
 
   const audit = fs.readFileSync(path.join(dir, LOCK_AUDIT_FILE), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(audit.length, 1, '接管必须留一条审计');
   assert.equal(audit[0].action, 'takeover-stale-lock');
   assert.equal(audit[0].deadPid, deadPid);
+  assert.equal(audit[0].previousEpoch, 7);
+  assert.equal(audit[0].nextEpoch, 8);
 
   await fence.stop();
-  assert.equal(fence.epoch, 8, '正常交接仍按 epoch+1');
+  assert.equal(fence.epoch, 9, '正常交接仍按 epoch+1');
 });
 
 test('F4b 持锁进程仍存活 → 拒绝打开，不抢占', () => {

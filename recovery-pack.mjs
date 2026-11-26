@@ -5,6 +5,7 @@
 //  - 原始引用统一使用 `${sessionId}#${seq}` 唯一定位，杜绝跨会话同 seq 混淆；
 //  - 严格区分已确认结论（status==='confirmed' && origin/voice 非纯模型建议）与模型建议；
 //  - 历史材料不足时明确标出 insufficientMaterial，绝不编造结论。
+import { scrubText } from './sanitize.mjs';
 
 const nonempty = (v) => typeof v === 'string' && v.trim().length > 0;
 
@@ -245,4 +246,26 @@ export function buildRecoveryPack({
 
   pack.markdown = lines.join('\n');
   return pack;
+}
+
+/**
+ * 导出前脱敏：恢复包只包含事实陈述与引用，不会话正文；
+ * 事实文本仍可能由用户写入凭据形态字符串，统一走既有 scrubText。
+ * 纯函数，保持 buildRecoveryPack 的确定性不变。
+ */
+export function sanitizeRecoveryPack(pack, { maxLen = 2000 } = {}) {
+  if (!pack || typeof pack !== 'object') return pack;
+  const clean = (v) => (typeof v === 'string' ? scrubText(v, maxLen) : v);
+  const scrubItem = (x) => ({
+    ...x,
+    statement: clean(x?.statement),
+    disputeReason: clean(x?.disputeReason ?? null),
+  });
+  const out = { ...pack, markdown: scrubText(pack.markdown, 20000) };
+  for (const k of ['title', 'originalQuestion', 'currentGoal']) out[k] = clean(pack[k]);
+  for (const k of ['confirmedConclusions', 'openHypotheses', 'deadEnds', 'stanceEvolution', 'openQuestions', 'modelSuggestions']) {
+    out[k] = Array.isArray(pack[k]) ? pack[k].map(scrubItem) : [];
+  }
+  out.coverageGaps = Array.isArray(pack.coverageGaps) ? pack.coverageGaps.map(clean) : [];
+  return out;
 }

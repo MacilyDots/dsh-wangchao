@@ -35,7 +35,14 @@ Nothing is worse than an AI summary that sounds confident but can't point to whe
 ![Evidence Drawer Preview](promo-screenshots/03-evidence-drawer.png)
 *▲ Clickable `[seq]` Evidence Drawer & Read-Only Verification (design preview with illustrative data)*
 
-### 4. The Censorate: An Honest Gatekeeper
+### 4. Research Workflow: Ideas Don't Get Lost, and Tomorrow Can Pick Up
+Scattered chats are survivable; ideas without a home are not. Wangchao treats research as a traceable line:
+- **Idea inbox**: Capture a thought in one line, review it under *To sort*, then confirm, ignore, or promote it into research. Duplicate submissions are de-duplicated.
+- **Stages and lifecycle**: Spark → Exploring → Validated → Established, with time, actor, and reason recorded for every change; shelving, rekindling, and resuming all leave an event trail.
+- **Layered facts**: User statements, model inferences, and evidence-backed claims are labeled separately. Locked facts cannot be overwritten by models or summaries, and disputes/supersessions are shown as they are.
+- **Recovery pack**: Generate a Markdown pack with the goal, current stage, confirmed conclusions, open hypotheses, dead ends, open questions, linked sessions, and citations. It is preview-and-copy only, never auto-creates sessions, and redacts credential-shaped text before export.
+
+### 5. The Censorate: An Honest Gatekeeper
 Many tools paint a green checkmark even when nothing was actually checked. The Censorate does the opposite—**if something hasn't been verified, it says so**:
 - It clearly separates **Frozen**, **Abnormal**, **Unverified**, and **Normal** states.
 - Whenever probes are missing, execution is unconfigured, or your authorized scope is incomplete, it honestly reports **Unverified** instead of faking a pass.
@@ -59,6 +66,19 @@ Register the plugin in your DeepSeek Harness profile (`cordis.patch.yml`):
 ```
 
 Add the directories or session IDs you want to include under `allowCwds` or `allowSessions`, restart DeepSeek Harness, and open **御书房** from the sidebar.
+
+**Rule semantics**: leaving a field empty and saving means *explicitly not authorized* for that dimension (it will not fall back to the config file). To restore the config baseline, click *Restore config baseline*, which removes the override. Legacy empty arrays are migrated as explicit empty sets so upgrade never widens your collection scope.
+
+Optional runtime settings (safe defaults; invalid values fail closed or fall back to defaults):
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `pollIntervalMs` | 30000 (min 5000) | Collection poll interval |
+| `maxSessionsPerPoll` | 10 | Max sessions synced per round |
+| `maxAttemptsPerChild` | 2 | Daily attempt cap per executor child |
+| `maxTotalTrialRequests` | 2 | Lifetime real-request cap (manual review after exhaustion) |
+| `budgetLimitUsd` / `budgetSingleUsd` | 0 / 0.01 | Local budget gate (cumulative / single request; not a provider bill) |
+| `stateDir` | `<DSH_HOME>/wangchao` | State directory |
 
 ---
 

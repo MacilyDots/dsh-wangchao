@@ -11,6 +11,7 @@ import path from 'node:path';
 /** 与 exec-gate-wiring 保持一致的唯一默认真实路由（试验期）。 */
 export const DEFAULT_REAL_ROUTES = Object.freeze([
   Object.freeze({ provider: 'deepseek-official', model: 'deepseek-flash' }),
+  Object.freeze({ provider: 'deepseek-account', model: 'deepseek-flash' }),
 ]);
 
 /** 凭据环境变量命名规范：大写字母/数字/下划线，且必须以 _KEY 或 _TOKEN 结尾，避免误读配置路径。 */
@@ -112,7 +113,11 @@ export function assessRealModelReadiness(input = {}) {
   const blockers = [];
   const checks = [];
 
-  const add = (name, ok, detail) => { checks.push({ name, ok, detail }); if (!ok) blockers.push({ name, ...detail }); };
+  const add = (name, ok, detail) => {
+    const code = detail?.code ?? name;
+    checks.push({ name, ok, code, detail });
+    if (!ok) blockers.push({ name, ...detail, code });
+  };
 
   // 1) 路由白名单
   const route = resolveRealRoute({ provider: cfg.realModelProvider, model: cfg.realModelModel }, { allowedRoutes: input.allowedRoutes });
