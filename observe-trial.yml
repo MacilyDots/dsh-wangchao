@@ -1,0 +1,20 @@
+# 观察版试用配置（隔离环境）
+#
+# 用法：
+#   $env:DSH_HOME = 'B:\DSH\Agent\_leader-probe\test-home'
+#   dsh --profile leader-web --patch B:\DSH\Agent\leader\observe-trial.yml --no-open --port 59981
+#
+# 启动后必须核对：wangchao_status 返回 observeOnly: true 且 preStepGuardInstalled: false。
+# observeOnly 只有明确为 true 才不安装宿主级 agent/pre-step 守卫；缺省或写错按完整版运行。
+- insert:
+    - id: dsh-wangchao
+      name: dsh-wangchao
+      config:
+        allowCwds:
+          - B:/DSH
+        excludeCwds:
+          - B:\DSH\Agent
+        pollIntervalMs: 5000
+        maxSessionsPerPoll: 50
+        observeOnly: true
+        stateDir: B:/DSH/Agent/_leader-probe/out/observe-trial-state

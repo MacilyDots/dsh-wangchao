@@ -1,0 +1,101 @@
+{
+  "dir": "C:\\Users\\t4365\\AppData\\Local\\Temp\\wc-epoch-recovery-xi07D0",
+  "at": "2026-11-24T14:24:02.517Z",
+  "steps": [
+    {
+      "name": "A-open-and-stop",
+      "status": 0,
+      "parsed": {
+        "mode": "open-and-stop",
+        "pid": 16720,
+        "epochBefore": 1,
+        "epochAfter": 2,
+        "closed": true,
+        "lockHeld": false
+      },
+      "stderr": ""
+    },
+    {
+      "name": "B-open-and-die",
+      "status": 7,
+      "parsed": {
+        "mode": "open-and-die",
+        "pid": 10880,
+        "epoch": 2,
+        "lockHeld": true
+      },
+      "stderr": ""
+    },
+    {
+      "name": "C-before-recovery",
+      "status": 1,
+      "parsed": {
+        "mode": "open-and-stop",
+        "error": "LOCK_HELD",
+        "message": "执行预算写锁已被占用（另一实例或上次异常退出），拒绝打开；不自动接管，需人工核对后清理"
+      },
+      "stderr": ""
+    },
+    {
+      "name": "manual-recovery",
+      "removed": "exec-budget.lock",
+      "preserved": "writer-epoch.json",
+      "epochAfterRecovery": 2
+    },
+    {
+      "name": "D-after-recovery",
+      "status": 0,
+      "parsed": {
+        "mode": "open-and-stop",
+        "pid": 7476,
+        "epochBefore": 2,
+        "epochAfter": 3,
+        "closed": true,
+        "lockHeld": false
+      },
+      "stderr": ""
+    },
+    {
+      "name": "stale-writer-write",
+      "attemptedEpoch": 1,
+      "currentEpoch": 3,
+      "code": "STALE_WRITER"
+    },
+    {
+      "name": "history-integrity",
+      "before": {
+        "exec-budget.json": "60aff22f4fe45d3531b6020d319fe61588d67f84612acaa193aedbb03020104c",
+        "governance.json": "f12966db6ed0cfc554d6637c0e4b67debec4fd7216f5608b90897155fb524526",
+        "state.json": "a22a7ec6e9912d7f8d81cb959052f1875d58676b9284c131c260ab3176a91230",
+        "tasks.json": "faab7538e93b21af6ee53aef5e69df31750d70f6a32390a0b5dba808be883fbf"
+      },
+      "after": {
+        "exec-budget.json": "60aff22f4fe45d3531b6020d319fe61588d67f84612acaa193aedbb03020104c",
+        "governance.json": "f12966db6ed0cfc554d6637c0e4b67debec4fd7216f5608b90897155fb524526",
+        "state.json": "a22a7ec6e9912d7f8d81cb959052f1875d58676b9284c131c260ab3176a91230",
+        "tasks.json": "faab7538e93b21af6ee53aef5e69df31750d70f6a32390a0b5dba808be883fbf"
+      }
+    }
+  ],
+  "facts": {
+    "writerB": {
+      "pid": 10880,
+      "exitStatus": 7
+    },
+    "orphanLock": {
+      "pid": 10880,
+      "alive": false,
+      "epochOnDisk": 2
+    },
+    "epochChain": [
+      1,
+      2,
+      2,
+      2,
+      2,
+      3,
+      4
+    ]
+  },
+  "verdict": "PASS"
+}

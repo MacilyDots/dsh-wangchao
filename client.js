@@ -267,7 +267,7 @@ window.__ModuleLoader__.load({
         '.wc-report-title{display:inline-flex;align-items:center;gap:8px;font-family:var(--ldr-serif);font-weight:700;font-size:15px;letter-spacing:.06em;color:var(--ldr-fg)}',
         '.wc-report-title::before{content:"御";display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px;background:var(--ldr-accent);color:#fffdf9;font-size:12px;font-weight:700;letter-spacing:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22)}',
                 '.wc-grid{flex:1;min-height:0;display:grid;grid-template-columns:236px minmax(320px,1fr) 276px;gap:10px}',
-        '@media (max-width:1180px){.wc-grid{grid-template-columns:1fr}.wc-col{max-height:none}}',
+        '@media (max-width:1180px){.wc-layout{height:auto;min-height:100%;overflow:auto}.wc-grid{grid-template-columns:1fr}.wc-col{max-height:none}}',
         '.wc-col{min-width:0;border:1px solid var(--ldr-border);border-radius:10px;background:linear-gradient(180deg,var(--ldr-soft),transparent 54px),var(--ldr-surface);padding:12px 14px;overflow:auto;box-shadow:0 2px 8px var(--ldr-shadow);scrollbar-width:thin;scrollbar-color:var(--ldr-border2) transparent}',
         '.wc-col::-webkit-scrollbar{width:6px;height:6px}',
         '.wc-col::-webkit-scrollbar-thumb{background:var(--ldr-border2);border-radius:999px}',
@@ -1583,9 +1583,9 @@ window.__ModuleLoader__.load({
               const latest = Number.isSafeInteger(j.latestSeq) ? j.latestSeq : msgLatest;
               if (latest !== null && (latestSeqRef.current === null || latest > latestSeqRef.current)) latestSeqRef.current = latest;
               if (!historyAll && Number.isSafeInteger(j.hiddenCount)) setHiddenCount(j.hiddenCount);
-              // 页面刷新未记录基线时，默认只保留最近一条为“本次对话”，更早的折叠。
-              if (!historyAll && !baselineSetRef.current && msgSeqs.length > 0) {
-                applySinceSeq(msgSeqs.length > 1 ? msgSeqs[msgSeqs.length - 2] : -1);
+              // 页面刷新未记录基线时，默认从最新一条之后开始，历史全部折叠，保持干净的新对话区。
+              if (!historyAll && !baselineSetRef.current && latest !== null && latest >= 0) {
+                applySinceSeq(latest);
               }
               // 乐观占位在收到新 assistant 消息后撤掉，并把轮询恢复为低频。
               if (awaitingRef.current && j.messages.some(function (m) {
@@ -2209,7 +2209,16 @@ window.__ModuleLoader__.load({
             type: 'button',
             className: 'ldr-btn',
             onClick: function () { setReportExpanded(function (v) { return !v; }); },
-          }, reportExpanded ? '收起详情' : '展开详情')));
+          }, reportExpanded ? '收起详情' : '展开详情'),
+          (typeof window === 'undefined' || window.__wcStandalone !== true) && props.onOpenStandalone
+            ? h('button', {
+                type: 'button',
+                className: 'ldr-btn',
+                title: props.standaloneErr || '',
+                disabled: !props.standaloneReady && !props.standaloneErr,
+                onClick: props.onOpenStandalone,
+              }, props.standaloneErr ? '独立窗口不可用' : '独立窗口')
+            : null));
       const reportDetail = reportExpanded ? h('div', { className: 'wc-report-detail' },
         barErr
           ? h('div', { className: 'wc-op-error' }, '报告条数据不可用（已隐藏旧指标，绝不猜测为 0）：' + barErr)
@@ -2730,7 +2739,7 @@ window.__ModuleLoader__.load({
             className: 'ldr-btn',
             onClick: function () { setProposalsOpen(function (v) { return !v; }); },
           }, proposalsOpen ? '收起提案' : '展开提案')),
-        proposalsOpen ? h('div', null,
+        proposalsOpen ? h('div', { className: 'wc-proposal-body', style: { maxHeight: 'min(36vh, 320px)', overflowY: 'auto', paddingRight: 4 } },
           proposalErr ? h('div', { className: 'wc-op-error' }, proposalErr) : null,
           proposalNotice ? h('div', { className: 'wc-op-ok', style: { marginBottom: 4 } }, proposalNotice) : null,
           !executorReady
@@ -2738,8 +2747,7 @@ window.__ModuleLoader__.load({
             : null,
           visibleProposals.length === 0
             ? h('div', { className: 'ldr-dim' }, '暂无待确认提案')
-            : h('div', { style: { maxHeight: 180, overflowY: 'auto', paddingRight: 4 } },
-                visibleProposals.map(function (p, i) {
+            : visibleProposals.map(function (p, i) {
                   if (!p || typeof p !== 'object') return null;
                   const bodyText = String(p.content || '（提案正文缺失）').replace(/\\n/g, '\n');
                   return h('div', { key: p.id || i, className: 'wc-proposal-item' },
@@ -2769,7 +2777,7 @@ window.__ModuleLoader__.load({
                         disabled: proposalBusy || !p.id,
                         onClick: function () { confirmProposal(p.id); },
                       }, '授权执行') : null));
-                })),
+                }),
           adoptedPlans.length > 0 ? h('div', { style: { marginTop: 8, paddingTop: 6, borderTop: '1px dashed var(--ldr-border)' } },
             h('div', { className: 'ldr-dim', style: { marginBottom: 4, fontWeight: 600 } }, '已采纳计划（仅本地归档，未触发执行）'),
             adoptedPlans.slice(0, 5).map(function (t, idx) {
@@ -3116,26 +3124,28 @@ window.__ModuleLoader__.load({
         ? h('div', { className: 'wc-bottom' }, visibleCards)
         : h('div', { className: 'ldr-dim' }, '底栏卡片已全部隐藏，点击上方卡片开关恢复显示');
 
-      const hanlinModalText = barHanlin && typeof barHanlin.digest === 'string' && barHanlin.digest.trim() ? barHanlin.digest.trim() : null;
-      const hanlinModalMeta = barHanlin ? [barHanlin.digestSource, barHanlin.digestModel].filter(Boolean).join(' · ') : '';
-      const hanlinModal = hanlinOpen && hanlinModalText
-        ? h('div', { className: 'wc-ledger-mask', onClick: function () { setHanlinOpen(false); } },
+      const hanlinDrawerText = barHanlin && typeof barHanlin.digest === 'string' && barHanlin.digest.trim() ? barHanlin.digest.trim() : null;
+      const hanlinDrawerMeta = barHanlin ? [barHanlin.digestSource, barHanlin.digestModel].filter(Boolean).join(' · ') : '';
+      const hanlinDrawer = hanlinOpen && hanlinDrawerText
+        ? h('div', { className: 'wc-evidence-mask', onClick: function () { setHanlinOpen(false); } },
             h('div', {
-              className: 'wc-ledger-panel',
-              style: { width: 'min(680px, 92vw)' },
+              className: 'wc-evidence',
+              style: { width: 'min(520px, 92vw)' },
               onClick: function (e) { if (e && e.stopPropagation) e.stopPropagation(); },
             },
-              h('div', { className: 'ldr-h' },
-                '翰林院今日奏折',
-                h('button', { type: 'button', className: 'ldr-toggle', onClick: function () { setHanlinOpen(false); } }, '关闭')),
-              hanlinModalMeta ? h('div', { className: 'ldr-dim', style: { marginBottom: 8 } }, hanlinModalMeta) : null,
-              h('div', { className: 'wc-rem-summary', style: { whiteSpace: 'pre-wrap', lineHeight: 1.7, maxHeight: '65vh', overflow: 'auto' } }, hanlinModalText)))
+              h('div', { className: 'wc-evidence-head' },
+                h('span', null, '翰林院今日奏折'),
+                h('div', { className: 'ldr-row' },
+                  h('button', { type: 'button', className: 'ldr-btn', disabled: hanlinBusy, onClick: runHanlinDigest }, hanlinBusy ? '生成中…' : '重新生成'),
+                  h('button', { type: 'button', className: 'ldr-toggle', onClick: function () { setHanlinOpen(false); } }, '关闭'))),
+              hanlinDrawerMeta ? h('div', { className: 'ldr-dim', style: { marginTop: 8 } }, hanlinDrawerMeta) : null,
+              h('div', { className: 'wc-evidence-body' }, hanlinDrawerText)))
         : null;
 
       return h('div', { className: 'wc-layout' }, report, reportDetail,
         h('div', { className: 'wc-grid' }, left, middle, right), cardToggles, bottom,
         evidencePanel,
-        hanlinModal,
+        hanlinDrawer,
         ledgerOpen
           ? h('div', { className: 'wc-ledger-mask', onClick: function () { setLedgerOpen(false); } },
               h('div', {
@@ -4583,6 +4593,17 @@ window.__ModuleLoader__.load({
             onOpenSession: openSessionDrawer,
             onOpenScope: function () { openScopeDrawer(); },
             onOpenHanlin: function () { setDrawer('hanlin'); },
+            standaloneReady: !!standaloneUrl,
+            standaloneErr: standaloneErr,
+            onOpenStandalone: function () {
+              fetch('/api/dsh-wangchao/open-standalone', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (j) {
+                  if (!j || j.ok !== true) setStandaloneErr((j && j.error) || '启动失败');
+                  else setStandaloneErr(null);
+                })
+                .catch(function (e) { setStandaloneErr(String((e && e.message) || e)); });
+            },
             onSummonChief: summonChief,
             onNewChiefTopic: newChiefTopic,
             chiefBusy: chiefBusy,

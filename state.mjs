@@ -208,7 +208,10 @@ export function createStateDomain(ctx, config) {
     : ['read'];
 
   // 执行子 Agent 的路由与输出硬上限：生产只允许已核实的真实路由；不存在环境变量扩权入口。
-  const allowedRealRoutes = [{ provider: 'deepseek-official', model: 'deepseek-flash' }];
+  const allowedRealRoutes = [
+    { provider: 'deepseek-official', model: 'deepseek-flash' },
+    { provider: 'deepseek-account', model: 'deepseek-flash' },
+  ];
   // 显式把 maxTokens 放进 startActivation.agentOptions，确保线上请求真的带 512，而不是只在账本里记录。
   const execProvider = typeof cfg.execProvider === 'string' && cfg.execProvider.trim() ? cfg.execProvider.trim() : null;
   const execModel = typeof cfg.execModel === 'string' && cfg.execModel.trim() ? cfg.execModel.trim() : null;

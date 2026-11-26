@@ -1711,9 +1711,9 @@ export async function apply(ctx, config) {
             }
             return null;
           },
-          // 角色会话归属：仅首辅当前会话与翰林院摘要标识；供真实模型门禁核验身份（不接受请求体伪造）
+          // 角色会话归属：仅隔离试验时把首辅纳入执行预算门禁；常规只读对话复用宿主默认模型，不套用执行子 Agent 的 512 输出硬上限。
           managedSession: (sid) => {
-            if (sid && state.chief?.sessionId === sid) return { role: 'chief' };
+            if (cfg.isolatedTestExecution === true && sid && state.chief?.sessionId === sid) return { role: 'chief' };
             if (sid === HANLIN_SESSION_ID) return { role: 'hanlin' };
             return null;
           },
