@@ -83,7 +83,8 @@
     "CHANGELOG.md",
     "LICENSE",
     "README.en.md",
-    "README.md"
+    "README.md",
+    "SECURITY-ADVISORY.md"
   ],
   "dsh": {
     "bundle": {

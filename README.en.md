@@ -82,6 +82,23 @@ Optional runtime settings (safe defaults; invalid values fail closed or fall bac
 
 ---
 
+## Upgrading from 0.5.0-alpha.4.1
+
+1. Stop DSH (or at least the instance using that `stateDir`) and back up the whole `wangchao` state directory.
+2. Upgrade to `0.5.0-alpha.5.1`.
+3. Open *Collection Scope* and verify each field's source (panel override / inherited config) and the effective exclusion result.
+4. If the old `rulesOverride` no longer matches your config, use *Restore config baseline* (or the per-field *Restore inherited* action).
+5. Early versions had a stale-lock takeover race (see [SECURITY-ADVISORY.md](SECURITY-ADVISORY.md)). If `exec-budget.lock` is left over, confirm no active writer and delete it manually before upgrading. **Do not delete** `writer-epoch.json` or the ledger.
+
+## Known Limitations
+
+- **Electron desktop / SEC-1C isolation acceptance: NOT VERIFIED / BLOCKED.** UI evidence comes from an isolated browser and an isolated DSH Web GUI, not an Electron acceptance run.
+- **Real commercial-model agent round-trip**: acceptance status follows the actual evidence at release time; unverified items are not described as passing.
+- The local budget gate is an estimator/circuit breaker, not a provider bill cap.
+- Recovery-pack redaction uses finite patterns and cannot prove exhaustiveness; session bodies are excluded by default.
+
+---
+
 ## What's Next
 
 For now, Wangchao is focused on stabilizing its DSH-based foundation (read-only advisor, traceable ledger, separated plan adoption, and honest inspection). Looking ahead, we plan to:
