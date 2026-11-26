@@ -14,7 +14,7 @@
 | 开发工作树 | `B:\DSH\Agent\_t5\alpha5-workflow-stability`（从生产目录完整复制，含未提交修复与测试；排除 `_tmp-tests`、`.tmp`） |
 | 开发分支 | `ap05/alpha5-workflow-stability` |
 | 基线快照 | `4031234`（生产 alpha.4.1 + RRP 后端 + 未提交修复的完整快照） |
-| 开发 HEAD（固定） | `58a01a3fd69296930cb69d4bbf279881bbf83995` |
+| 代码固定 HEAD | `58a01a3fd69296930cb69d4bbf279881bbf83995`（交付报告提交紧随其后，见交付消息） |
 | 版本 | `package.json` → `0.5.0-alpha.5` |
 
 生产目录核查：HEAD 未变，27 个既有未提交改动未动（与开工时一致），关键文件 SHA-256 前缀与开工时相同（`index.mjs C145A22A`、`client.js 9CC57A23`、`state.mjs 1F69C55A`、`package.json 01B63C8F`）。本工作包未写入生产目录、未重启生产、未改账本。
