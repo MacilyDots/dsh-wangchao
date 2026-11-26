@@ -901,23 +901,34 @@ window.__ModuleLoader__.load({
           p.err ? h('div', { className: 'ldr-err' }, p.err) : h('div', { className: 'ldr-empty' }, '正在读取规则…'));
       }
       const sourceText = rs.source === 'override'
-        ? '当前使用面板保存的规则（按字段覆盖配置文件基线；留空的字段表示该项明确不授权）'
+        ? '当前使用面板保存的规则（按字段覆盖配置文件基线；未覆盖的字段继承配置）'
         : '当前使用配置文件基线（尚未保存面板规则）';
-      const anyExplicitEmpty = rs.source === 'override' && (function () {
-        const ex = Array.isArray(rs.explicitFields) ? rs.explicitFields : null;
-        if (!ex) return false;
-        return ex.some(function (k) { return Array.isArray(rs.rules && rs.rules[k]) && rs.rules[k].length === 0; });
-      })();
+      const explicitFields = Array.isArray(rs.explicitFields) ? rs.explicitFields : [];
+      const baseRules = rs.config && typeof rs.config === 'object' ? rs.config : {};
+      const anyExplicitEmpty = rs.source === 'override' && explicitFields.some(function (k) {
+        return Array.isArray(rs.rules && rs.rules[k]) && rs.rules[k].length === 0;
+      });
+      const inheritedExcludes = ['excludeCwds', 'excludeSessions'].filter(function (k) {
+        return explicitFields.indexOf(k) < 0 && Array.isArray(baseRules[k]) && baseRules[k].length > 0;
+      });
       const field = function (key, label, hint) {
+        const fromOverride = rs.source === 'override' && explicitFields.indexOf(key) >= 0;
+        const dirty = !!(p.dirty && p.dirty[key]);
         return h('div', { className: 'ldr-field', key: key },
           h('label', { className: 'ldr-label' }, label),
           h('div', { className: 'ldr-dim' }, hint),
+          h('div', { className: 'ldr-dim' },
+            '来源：' + (fromOverride ? '面板覆盖' : '继承配置基线') + (dirty ? ' · 本次已编辑（未保存）' : '')),
           h('textarea', {
             className: 'ldr-textarea',
             value: p.draft[key],
             spellCheck: false,
             onChange: function (e) { p.onChange(key, e.target.value); },
-          }));
+          }),
+          h('button', {
+            className: 'ldr-toggle', disabled: p.saving || !fromOverride,
+            onClick: function () { p.onRestoreField(key); },
+          }, fromOverride ? '恢复为继承配置' : '当前已继承配置'));
       };
       const candBlock = function () {
         const c = p.cand;
@@ -971,12 +982,21 @@ window.__ModuleLoader__.load({
         anyExplicitEmpty
           ? h('div', { className: 'ldr-warn' }, '注意：下方存在留空的允许项。保存后该允许集合为空（明确不授权），不会回落到配置文件基线；要恢复基线请点「恢复配置文件基线」。')
           : null,
-        field('allowCwds', '允许的目录（allowCwds）', '每行一个目录；会话 cwd 在任一目录下才可能被采集。留空并保存 = 明确不按目录允许'),
-        field('excludeCwds', '排除的目录（excludeCwds）', '每行一个目录；优先级高于允许目录'),
-        field('allowSessions', '允许的会话（allowSessions）', '每行一个会话 id；仅对未被排除目录/排除会话覆盖的会话生效（排除优先，不会覆盖排除规则）。留空并保存 = 明确不按会话允许'),
-        field('excludeSessions', '排除的会话（excludeSessions）', '每行一个会话 id；优先级最高'),
+        field('allowCwds', '允许的目录（allowCwds）', '每行一个目录；会话 cwd 在任一目录下才可能被采集。留空并保存 = 明确不按目录允许（收紧）'),
+        field('excludeCwds', '排除的目录（excludeCwds）', '每行一个目录；优先级高于允许目录。清空会撤销拒绝规则，需要显式确认'),
+        field('allowSessions', '允许的会话（allowSessions）', '每行一个会话 id；仅对未被排除目录/排除会话覆盖的会话生效。留空并保存 = 明确不按会话允许（收紧）'),
+        field('excludeSessions', '排除的会话（excludeSessions）', '每行一个会话 id；优先级最高。清空会撤销拒绝规则，需要显式确认'),
+        inheritedExcludes.length > 0
+          ? h('label', { className: 'ldr-row', style: { marginTop: 4, alignItems: 'center' } },
+              h('input', {
+                type: 'checkbox', checked: p.clearExcludeAck === true,
+                onChange: function (e) { p.onAck(e.target.checked); },
+              }),
+              h('span', { className: 'ldr-warn' },
+                '我明确要清除继承的排除规则（' + inheritedExcludes.join(' / ') + '）：这会扩大采集范围'))
+          : null,
         h('div', { className: 'ldr-row', style: { marginTop: 4 } },
-          h('button', { className: 'ldr-primary', disabled: p.saving, onClick: p.onSave }, p.saving ? '保存中…' : '保存规则'),
+          h('button', { className: 'ldr-primary', disabled: p.saving, onClick: p.onSave }, p.saving ? '保存中…' : '保存规则（仅提交已编辑字段）'),
           h('button', { className: 'ldr-danger', disabled: p.saving, onClick: p.onReset }, '恢复配置文件基线（删除面板覆盖）')),
         h('div', { className: 'ldr-h', style: { marginTop: 20 } }, '候选会话'),
         candBlock());
@@ -3304,6 +3324,10 @@ window.__ModuleLoader__.load({
       const [rulesState, setRulesState] = React.useState(null);
       const [rulesErr, setRulesErr] = React.useState(null);
       const [rulesDraft, setRulesDraft] = React.useState({ allowCwds: '', excludeCwds: '', allowSessions: '', excludeSessions: '' });
+      // 稀疏保存：只提交用户实际编辑过的字段；未编辑字段保持原语义（覆盖或继承）。
+      const [rulesDirty, setRulesDirty] = React.useState({});
+      // 清除「继承的拒绝规则」是扩大采集范围的操作，必须单独确认。
+      const [clearExcludeAck, setClearExcludeAck] = React.useState(false);
       const [saving, setSaving] = React.useState(false);
       const savingRef = React.useRef(false);
       const [cand, setCand] = React.useState(null);
@@ -3367,6 +3391,8 @@ window.__ModuleLoader__.load({
         // 规则可能含路径与会话 ID，草稿也可能含未提交内容：一并清掉，避免重新验证后旧数据回显。
         setRulesState(null);
         setRulesDraft({ allowCwds: '', excludeCwds: '', allowSessions: '', excludeSessions: '' });
+        setRulesDirty({});
+        setClearExcludeAck(false);
       }, [invalidateAsyncForAuth]);
 
       // 规则编辑用纯文本行：一行一项，保存时再拆成数组
@@ -3828,6 +3854,8 @@ window.__ModuleLoader__.load({
           if (my !== genRef.current) return;
           setRulesState(j);
           setRulesDraft(draftOf(j));
+          setRulesDirty({});
+          setClearExcludeAck(false);
           setSt(function (prev) { return Object.assign({}, prev, { rulesAuthUnknown: false }); });
         }).catch(function (e) {
           if (my !== genRef.current) return;
@@ -3888,13 +3916,11 @@ window.__ModuleLoader__.load({
             setRulesErr('规则未保存：' + (res.json && res.json.error ? res.json.error : ('HTTP ' + res.status)));
             // 重新读取实际生效值：保存失败时不能把界面留在「看起来已保存」的状态
             return fetch('/api/dsh-wangchao/rules').then(function (r) { return r.ok ? r.json() : null; })
-              .then(function (j) { if (j) { setRulesState(j); setRulesDraft(draftOf(j)); } })
+              .then(function (j) { if (j) { setRulesState(j); setRulesDraft(draftOf(j)); setRulesDirty({}); setClearExcludeAck(false); } })
               .catch(function () {});
           }
-          setRulesState(function (prev) { return Object.assign({}, prev, {
-            rules: res.json.rules, source: res.json.source, updatedAt: Date.now(),
-            revision: typeof res.json.revision === 'number' ? res.json.revision : (prev && prev.revision),
-          }); });
+          setRulesDirty({});
+          setClearExcludeAck(false);
           const savedDraft = draftOf({ rules: res.json.rules });
           if (includedId) {
             setRulesDraft(function (prev) { return Object.assign({}, prev, { allowSessions: savedDraft.allowSessions }); });
@@ -3907,6 +3933,10 @@ window.__ModuleLoader__.load({
             setRulesDraft(savedDraft);
             if (cand) loadCandidates();
           }
+          // 保存后重新读取权威值：带 explicitFields/config，界面才能显示每个字段的来源。
+          fetch('/api/dsh-wangchao/rules').then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (j) { if (j) setRulesState(j); })
+            .catch(function () {});
           // 规则变化可能让已打开的摘要面板对应会话被撤权：重新拉一次判权结果
           refreshSummaryPanel();
           load(true);
@@ -3920,13 +3950,32 @@ window.__ModuleLoader__.load({
       };
 
       const saveCurrent = function () {
-        postRules({
-          allowCwds: linesOf(rulesDraft.allowCwds),
-          excludeCwds: linesOf(rulesDraft.excludeCwds),
-          allowSessions: linesOf(rulesDraft.allowSessions),
-          excludeSessions: linesOf(rulesDraft.excludeSessions),
+        /** @type {any} */
+        const body = {};
+        for (const k of ['allowCwds', 'excludeCwds', 'allowSessions', 'excludeSessions']) {
+          if (!rulesDirty[k]) continue;   // 未编辑字段不提交，避免把继承值固化成覆盖
+          body[k] = linesOf(rulesDraft[k]);
+        }
+        if (Object.keys(body).length === 0) {
+          setRulesErr('没有修改：只提交你实际编辑过的字段；未编辑字段保持原有语义。');
+          return;
+        }
+        // 空排除字段是否在清除配置基线的拒绝项：是则要求显式确认。
+        const explicit = rulesState && Array.isArray(rulesState.explicitFields) ? rulesState.explicitFields : [];
+        const base = rulesState && rulesState.config && typeof rulesState.config === 'object' ? rulesState.config : {};
+        const risky = ['excludeCwds', 'excludeSessions'].filter(function (k) {
+          return rulesDirty[k] === true && body[k] && body[k].length === 0
+            && explicit.indexOf(k) < 0 && Array.isArray(base[k]) && base[k].length > 0;
         });
+        if (risky.length > 0 && !clearExcludeAck) {
+          setRulesErr('清空 ' + risky.join(' / ') + ' 会撤销配置基线中的拒绝规则并扩大采集范围：请先勾选「我明确要清除继承的排除规则」。');
+          return;
+        }
+        if (risky.length > 0) body.confirmClearExclude = true;
+        postRules(body);
       };
+      // 字段级恢复继承：null 表示删除该字段的面板覆盖，回到配置基线（服务端同契约）。
+      const restoreRuleField = function (k) { postRules({ [k]: null }); };
 
       const resetToConfig = function () { postRules({ reset: true }); };
 
@@ -4684,6 +4733,8 @@ window.__ModuleLoader__.load({
               cand: cand,
               diag: ov.diagnostics || null,
               draft: rulesDraft,
+              dirty: rulesDirty,
+              clearExcludeAck: clearExcludeAck,
               err: rulesErr,
               saving: saving,
               candLoading: candLoading,
@@ -4692,8 +4743,11 @@ window.__ModuleLoader__.load({
                 const next = Object.assign({}, rulesDraft);
                 next[k] = v;
                 setRulesDraft(next);
+                setRulesDirty(function (prev) { return Object.assign({}, prev, { [k]: true }); });
               },
+              onAck: function (v) { setClearExcludeAck(v === true); },
               onSave: saveCurrent,
+              onRestoreField: restoreRuleField,
               onReset: resetToConfig,
               onLoadCandidates: loadCandidates,
               onInclude: includeSession,

@@ -86,7 +86,6 @@ test('T1 双竞争者同时接管同一陈旧锁：最多一个成功，锁与�
 
   const lock = JSON.parse(fs.readFileSync(lockFile(dir), 'utf8'));
   assert.equal(lock.pid, opened[0].pid, '最终锁必须属于成功者');
-  assert.equal(lock.epoch, 8);
   assert.equal(lock.token !== 'stale-token', true);
 
   const takeovers = readAudit(dir).filter((e) => e.action === 'takeover-stale-lock');
@@ -165,7 +164,7 @@ test('T5 写前锁身份被替换：旧写者 fail-closed，不写账本、不�
   assert.equal(JSON.parse(fs.readFileSync(lockFile(dir), 'utf8')).token, 'usurper');
 });
 
-test('T6 接管成功后写锁字段完整（pid/token/epoch/kind/v）', async () => {
+test('T6 接管成功后写锁字段完整（pid/token/kind/v）', async () => {
   const dir = tmpState();
   const pid = await deadPid();
   seedStale(dir, pid);
@@ -174,8 +173,92 @@ test('T6 接管成功后写锁字段完整（pid/token/epoch/kind/v）', async (
   assert.equal(lock.pid, process.pid);
   assert.equal(lock.kind, 'writer-epoch-fencing');
   assert.equal(lock.v, 2);
-  assert.equal(lock.epoch, 8);
   assert.equal(typeof lock.token, 'string');
   assert.equal(fence.epoch, 8);
   await fence.stop();
+});
+
+test('T7 认领后普通写者抢先取得新锁（PROBE_2）：失败者不得改 epoch/写成功审计', async () => {
+  const dir = tmpState();
+  const pid = await deadPid();
+  seedStale(dir, pid);
+  const spied = { ...fs };
+  let injected = false;
+  spied.writeFileSync = (p, data, opts) => {
+    if (!injected && String(p) === lockFile(dir) && opts && opts.flag === 'wx' && !fs.existsSync(p)) {
+      injected = true;
+      // 模拟竞争写者 C 在 A 的 rename 与 wx 之间抢先创建新锁
+      fs.writeFileSync(p, JSON.stringify({ pid: process.pid, at: Date.now(), token: 'c-token', kind: 'writer-epoch-fencing', v: 2 }),
+        { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      const e = new Error('EEXIST: file already exists'); e.code = 'EEXIST'; throw e;
+    }
+    return fs.writeFileSync(p, data, opts);
+  };
+  assert.throws(() => createWriterEpochFence({ stateDir: dir, settleAttempt: () => {}, fsImpl: spied }), codeIs('LOCK_HELD'));
+  assert.equal(injected, true, '夹具必须真的插入竞争写者');
+  const ep = JSON.parse(fs.readFileSync(epochFile(dir), 'utf8'));
+  assert.equal(ep.epoch, 7, '失败接管者不得推进 epoch');
+  assert.equal(ep.writerToken, 'prev-writer', '失败接管者不得修改 writerToken');
+  const lock = JSON.parse(fs.readFileSync(lockFile(dir), 'utf8'));
+  assert.equal(lock.token, 'c-token', 'C 的新锁必须原样保留');
+  const audit = readAudit(dir);
+  assert.equal(audit.filter((e) => e.action === 'takeover-stale-lock').length, 0, '不得写成功接管审计');
+  assert.equal(audit.filter((e) => e.action === 'takeover-claimed').length, 0, '未取得锁前不得写认领审计');
+});
+
+test('T8 已取得新锁但 epoch 写入失败：释放自己的锁、恢复旧锁、不得写成功审计', async () => {
+  const dir = tmpState();
+  const pid = await deadPid();
+  seedStale(dir, pid);
+  const spied = { ...fs };
+  spied.writeFileSync = (p, data, opts) => {
+    if (String(p).includes('writer-epoch.json.') && String(p).endsWith('.tmp')) {
+      const e = new Error('EIO: 注入 epoch 写失败'); e.code = 'EIO'; throw e;
+    }
+    return fs.writeFileSync(p, data, opts);
+  };
+  assert.throws(() => createWriterEpochFence({ stateDir: dir, settleAttempt: () => {}, fsImpl: spied }), codeIs('LOCK_HELD'));
+  assert.equal(JSON.parse(fs.readFileSync(epochFile(dir), 'utf8')).epoch, 7, 'epoch 不得推进');
+  const lock = JSON.parse(fs.readFileSync(lockFile(dir), 'utf8'));
+  assert.equal(lock.token, 'stale-token', '旧锁必须恢复，等待人工处理');
+  const audit = readAudit(dir);
+  assert.equal(audit.filter((e) => e.action === 'takeover-stale-lock').length, 0);
+  assert.equal(audit.filter((e) => e.action === 'takeover-claimed').length, 1, '认领意图可以留痕');
+  assert.equal(audit.filter((e) => e.action === 'takeover-aborted').length, 1, '失败必须留中止记录');
+});
+
+test('T9 PID 存活 / EPERM / 未知探测错误：一律拒绝且不改变磁盘', async () => {
+  const dir = tmpState();
+  seedStale(dir, 424242);
+  const beforeLock = fs.readFileSync(lockFile(dir), 'utf8');
+  const beforeEpoch = fs.readFileSync(epochFile(dir), 'utf8');
+  const original = process.kill;
+  try {
+    for (const code of ['EPERM', 'EUNKNOWN']) {
+      process.kill = () => { const e = new Error(code); e.code = code; throw e; };
+      assert.throws(() => createWriterEpochFence({ stateDir: dir, settleAttempt: () => {} }), codeIs('LOCK_HELD'));
+      assert.equal(fs.readFileSync(lockFile(dir), 'utf8'), beforeLock);
+      assert.equal(fs.readFileSync(epochFile(dir), 'utf8'), beforeEpoch);
+    }
+    process.kill = () => true;
+    assert.throws(() => createWriterEpochFence({ stateDir: dir, settleAttempt: () => {} }), codeIs('LOCK_HELD'));
+  } finally {
+    process.kill = original;
+  }
+});
+
+test('T10 接管不触碰账本：reserved/unknown 记录原样保留，交由账本自身迁移', async () => {
+  const dir = tmpState();
+  const pid = await deadPid();
+  seedStale(dir, pid);
+  const ledger = path.join(dir, 'exec-budget.json');
+  const body = JSON.stringify({ version: 1, entries: [
+    { attemptId: 'a1', childId: 'c1', estimateUsd: 0.001, status: 'reserved', createdAt: Date.now() },
+    { attemptId: 'a2', childId: 'c1', estimateUsd: 0.001, status: 'unknown', createdAt: Date.now() },
+  ] }, null, 2);
+  fs.writeFileSync(ledger, body, 'utf8');
+  const fence = createWriterEpochFence({ stateDir: dir, settleAttempt: () => {} });
+  assert.equal(fs.readFileSync(ledger, 'utf8'), body, '接管不得改写账本');
+  await fence.stop();
+  assert.equal(fs.readFileSync(ledger, 'utf8'), body);
 });

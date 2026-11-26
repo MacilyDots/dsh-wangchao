@@ -67,7 +67,7 @@ Register the plugin in your DeepSeek Harness profile (`cordis.patch.yml`):
 
 Add the directories or session IDs you want to include under `allowCwds` or `allowSessions`, restart DeepSeek Harness, and open **御书房** from the sidebar.
 
-**Rule semantics**: leaving a field empty and saving means *explicitly not authorized* for that dimension (it will not fall back to the config file). To restore the config baseline, click *Restore config baseline*, which removes the override. Legacy empty arrays are migrated as explicit empty sets so upgrade never widens your collection scope.
+**Rule semantics**: leaving a field empty and saving means *explicitly not authorized* for that dimension (it will not fall back to the config file). Clearing an *inherited exclude* rule widens collection scope and requires an explicit confirmation. Saving only submits the fields you edited; untouched fields keep their existing meaning. To restore the config baseline, click *Restore config baseline* (or use the per-field *Restore inherited* action). Legacy empty arrays migrate per dimension: allows stay as empty sets (tighter), excludes fall back to the config baseline so upgrade never silently drops configured denials.
 
 Optional runtime settings (safe defaults; invalid values fail closed or fall back to defaults):
 

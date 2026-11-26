@@ -44,18 +44,20 @@ test('新格式：字段缺失 = 继承（区别于显式空数组）', () => {
   assert.deepEqual(merged.excludeCwds, []);
 });
 
-test('旧格式空数组迁移为显式空集（fail-closed，不扩大授权）', () => {
+test('旧格式空数组按维度迁移：允许保留空集，拒绝删除并继承基线', () => {
   const legacy = { sessions: {}, rulesOverride: { allowCwds: [], excludeCwds: [], allowSessions: [], excludeSessions: [] } };
   const migrated = migrateRuleOverride(legacy);
   assert.equal(migrated.rulesOverrideFormat, RULE_FORMAT_EXPLICIT);
-  assert.deepEqual(migrated.rulesOverride, { allowCwds: [], excludeCwds: [], allowSessions: [], excludeSessions: [] });
-  // 空集就是空集：不再回落到配置基线
-  assert.deepEqual(mergeRules(BASE, migrated.rulesOverride, migrated.rulesOverrideFormat), {
-    allowSessions: [], excludeSessions: [], allowCwds: [], excludeCwds: [],
-  });
+  assert.deepEqual(migrated.rulesOverride, { allowCwds: [], allowSessions: [] });
+  const merged = mergeRules(BASE, migrated.rulesOverride, migrated.rulesOverrideFormat);
+  assert.deepEqual(merged.allowCwds, []);
+  assert.deepEqual(merged.allowSessions, []);
+  // 拒绝维度必须继承基线，不能因迁移清空
+  assert.deepEqual(merged.excludeCwds, normalizeRuleSet(BASE).excludeCwds);
+  assert.deepEqual(merged.excludeSessions, normalizeRuleSet(BASE).excludeSessions);
 });
 
-test('旧格式非空字段保留，空字段同样保留为空集', () => {
+test('旧格式非空拒绝规则保留，空拒绝字段仍继承基线', () => {
   const legacy = {
     sessions: {},
     rulesOverride: {
@@ -66,9 +68,13 @@ test('旧格式非空字段保留，空字段同样保留为空集', () => {
   const migrated = migrateRuleOverride(legacy);
   assert.deepEqual(migrated.rulesOverride.allowSessions, ['session-legacy']);
   assert.deepEqual(migrated.rulesOverride.allowCwds, []);
+  assert.deepEqual(migrated.rulesOverride.excludeCwds, [path.resolve(os.tmpdir(), 'legacy-excluded')]);
+  assert.equal('excludeSessions' in migrated.rulesOverride, false);
   const merged = mergeRules(BASE, migrated.rulesOverride, migrated.rulesOverrideFormat);
   assert.deepEqual(merged.allowSessions, ['session-legacy']);
   assert.deepEqual(merged.allowCwds, []);
+  assert.deepEqual(merged.excludeCwds, [path.resolve(os.tmpdir(), 'legacy-excluded')]);
+  assert.deepEqual(merged.excludeSessions, normalizeRuleSet(BASE).excludeSessions);
 });
 
 test('已迁移数据再次加载保持幂等', () => {
@@ -105,15 +111,20 @@ test('重启后语义不变：显式空数组写盘、重新加载仍为空集',
   assert.deepEqual(mergeRules(cfg, loaded.state.rulesOverride, loaded.state.rulesOverrideFormat).allowCwds, []);
 });
 
-test('旧 state 文件加载时自动迁移：空数组按空集解释（fail-closed）', () => {
+test('旧 state 文件加载时自动迁移：允许空集保留，拒绝继承基线', () => {
   const dir = tmpDir('legacy-load');
   const file = path.join(dir, 'state.json');
   fs.writeFileSync(file, JSON.stringify({
     version: 2, sessions: {},
     rulesOverride: { allowCwds: [], excludeCwds: [], allowSessions: [], excludeSessions: [] },
   }), 'utf8');
-  const dom = createStateDomain({}, { stateDir: dir, allowCwds: [path.resolve(os.tmpdir())], allowSessions: ['session-base'] });
-  assert.deepEqual(dom.initialRules.allowCwds, [], '旧空数组不得被解释为继承基线');
+  const dom = createStateDomain({}, {
+    stateDir: dir,
+    allowCwds: [path.resolve(os.tmpdir())], allowSessions: ['session-base'],
+    excludeCwds: [path.resolve(os.tmpdir(), 'excluded-dir')], excludeSessions: ['session-base-excluded'],
+  });
+  assert.deepEqual(dom.initialRules.allowCwds, [], '旧空允许数组不得被解释为继承基线');
+  assert.deepEqual(dom.initialRules.excludeCwds, [path.resolve(os.tmpdir(), 'excluded-dir')], '旧空拒绝数组必须继承基线');
   assert.equal(dom.state.rulesOverrideFormat, RULE_FORMAT_EXPLICIT);
   assert.ok(dom.state.rulesMigratedAt > 0, '迁移必须留痕');
 });

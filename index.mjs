@@ -1995,7 +1995,7 @@ export async function apply(ctx, config) {
    * 一旦把落盘改成异步（await），两个并发请求就可能都看到旧 revision 后各自写盘，
    * 那时必须补进程内互斥或文件锁。
    */
-  const saveRules = (next, baseRevision) => {
+  const saveRules = (next, baseRevision, opts = {}) => {
     // 状态文件损坏时拒绝写入：否则会用空状态覆盖原文件，把可恢复的数据抹掉
     if (stateLoadIssue) return { ok: false, error: '状态文件不可读，拒绝写入（避免覆盖待恢复的状态）：' + stateLoadIssue };
     const currentRevision = state.rulesRevision ?? 0;
@@ -2006,20 +2006,35 @@ export async function apply(ctx, config) {
         error: `规则已被其他窗口修改（当前修订号 ${currentRevision}，你基于 ${baseRevision}），请重新读取后再保存`,
       };
     }
-    // 只接受调用方显式给出的字段：字段缺失 = 保持原状（继承基线或沿用既有覆盖），
-    // 不再把当前生效值整体固化成 override（否则改配置文件永远不再生效）。
+    // 只接受调用方显式给出的字段：缺失 = 保持原状；null = 显式恢复该字段继承配置基线。
     /** @type {any} */
     const fields = {};
+    /** @type {string[]} */
+    const deletions = [];
     for (const k of RULE_KEYS) {
-      if (Object.prototype.hasOwnProperty.call(next ?? {}, k) && Array.isArray(next[k])) {
-        fields[k] = normalizeRuleSet({ [k]: next[k] })[k];
+      if (!Object.prototype.hasOwnProperty.call(next ?? {}, k)) continue;
+      if (next[k] === null) { deletions.push(k); continue; }
+      if (Array.isArray(next[k])) fields[k] = normalizeRuleSet({ [k]: next[k] })[k];
+    }
+    if (Object.keys(fields).length === 0 && deletions.length === 0) {
+      return { ok: false, error: '没有可更新的规则字段（只接受 ' + RULE_KEYS.join(' / ') + '），null 表示恢复该字段继承配置' };
+    }
+    // 清除继承的拒绝规则会扩大采集范围：必须显式确认，不能由普通保存、空白输入或默认值触发。
+    for (const k of ['excludeCwds', 'excludeSessions']) {
+      if (Object.prototype.hasOwnProperty.call(fields, k) && fields[k].length === 0
+          && baseRules[k].length > 0 && opts.confirmClearExclude !== true) {
+        return {
+          ok: false, code: 'confirm-required', field: k,
+          error: `清空 ${k} 会撤销配置基线中的拒绝规则并扩大采集范围；如确属本意，请带 confirmClearExclude:true 重新提交`,
+        };
       }
     }
-    if (Object.keys(fields).length === 0) return { ok: false, error: '没有可更新的规则字段（只接受 ' + RULE_KEYS.join(' / ') + '）' };
     const prevOverride = state.rulesOverride ? { ...state.rulesOverride } : null;
     /** @type {any} */
     const nextOverride = { ...(prevOverride ?? {}), ...fields };
-    const normalized = mergeRules(baseRules, nextOverride, RULE_FORMAT_EXPLICIT);
+    for (const k of deletions) delete nextOverride[k];
+    const hasOverride = Object.keys(nextOverride).length > 0;
+    const normalized = mergeRules(baseRules, hasOverride ? nextOverride : null, RULE_FORMAT_EXPLICIT);
     const prev = {
       override: state.rulesOverride, format: state.rulesOverrideFormat,
       updatedAt: state.rulesUpdatedAt,
@@ -2035,9 +2050,15 @@ export async function apply(ctx, config) {
       || shrank(prev.rules.allowCwds, normalized.allowCwds);
     const nextEpoch = (state.rulesEpoch ?? 0) + (tightened ? 1 : 0);
     const nextRevision = currentRevision + 1;
-    state.rulesOverride = nextOverride;
-    // 显式格式标记：从这一刻起「字段存在即生效」，空数组是用户主动清空的授权集合。
-    state.rulesOverrideFormat = RULE_FORMAT_EXPLICIT;
+    if (hasOverride) {
+      state.rulesOverride = nextOverride;
+      // 显式格式标记：从这一刻起「字段存在即生效」，空数组是用户主动清空的授权集合。
+      state.rulesOverrideFormat = RULE_FORMAT_EXPLICIT;
+    } else {
+      // 所有字段都恢复继承：等价于没有覆盖，删除标记而不是留一个空对象冒充 override。
+      delete state.rulesOverride;
+      delete state.rulesOverrideFormat;
+    }
     state.rulesUpdatedAt = Date.now();
     state.rulesEpoch = nextEpoch;
     state.rulesRevision = nextRevision;
@@ -2058,7 +2079,7 @@ export async function apply(ctx, config) {
     // 规则变化后，在途翰林院摘要必须按新规则重新判权：直接中止，避免用旧授权跑完
     try { abortHanlinDigestsHook?.('采集规则变化，在途翰林院摘要已中止'); } catch {}
     try { liveRuntime.streams?.reconcile(true); } catch { liveRuntime.streams?.dispose(); liveRuntime.streams = null; }
-    return { ok: true, rules: normalized, source: 'override', epoch: nextEpoch, revision: nextRevision };
+    return { ok: true, rules: normalized, source: hasOverride ? 'override' : 'config', epoch: nextEpoch, revision: nextRevision };
   };
 
   /** 恢复配置文件基线：删除 override（同样先写盘成功才生效） */
@@ -2711,11 +2732,14 @@ export async function apply(ctx, config) {
             return json(r, r.ok ? 200 : (r.conflict ? 409 : 500));
           }
           const patch = {};
-          for (const k of RULE_KEYS) if (Array.isArray(body[k])) patch[k] = body[k];
-          if (Object.keys(patch).length === 0) {
-            return json({ ok: false, error: '没有可更新的规则字段（只接受 ' + RULE_KEYS.join(' / ') + '）' }, 400);
+          for (const k of RULE_KEYS) {
+            if (Object.prototype.hasOwnProperty.call(body, k) && (Array.isArray(body[k]) || body[k] === null)) patch[k] = body[k];
           }
-          const r = saveRules(patch, baseRevision);
+          if (Object.keys(patch).length === 0) {
+            return json({ ok: false, error: '没有可更新的规则字段（只接受 ' + RULE_KEYS.join(' / ') + '，null 表示恢复继承配置）' }, 400);
+          }
+          const r = saveRules(patch, baseRevision, { confirmClearExclude: body.confirmClearExclude === true });
+          if (!r.ok && r.code === 'confirm-required') return json(r, 400);
           if (r.ok) {
             const sid = state.chief?.sessionId;
             // 收紧一旦生效，当前首辅立即失去放行依据：主动中止在途分析（fail-closed，不写成功缓存）

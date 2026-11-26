@@ -105,3 +105,52 @@ test('规则收紧后，下一轮采集使用新规则而不是启动时的快�
   for (const timer of f.timers) await timer.fn();
   assert.equal(f.reads.length, before, '收紧后不得继续读取已排除会话');
 });
+
+const EXCLUDED_SID = 'session-44444444-4444-4444-8444-444444444444';
+
+test('稀疏保存不清除继承的排除规则；清空排除需显式确认；null 恢复继承', async (t) => {
+  const f = await fixture(t, { excludeSessions: [EXCLUDED_SID] });
+  let get = await f.call(RULES, undefined, 'GET');
+  assert.deepEqual(get.body.rules.excludeSessions, [EXCLUDED_SID], '基线排除规则应生效');
+  assert.deepEqual(get.body.explicitFields, []);
+
+  // 只改允许字段：不得触碰排除字段
+  const onlyAllow = await f.call(RULES, { allowCwds: [f.dir], baseRevision: get.body.revision });
+  assert.equal(onlyAllow.status, 200, onlyAllow.body.error);
+  assert.deepEqual(Object.keys(f.state().rulesOverride).sort(), ['allowCwds']);
+  get = await f.call(RULES, undefined, 'GET');
+  assert.deepEqual(get.body.rules.excludeSessions, [EXCLUDED_SID], '未编辑的排除规则必须保持继承');
+
+  // 无确认清空排除：400，且磁盘不变
+  const noConfirm = await f.call(RULES, { excludeSessions: [], baseRevision: get.body.revision });
+  assert.equal(noConfirm.status, 400);
+  assert.equal(noConfirm.body.code, 'confirm-required');
+  assert.deepEqual(f.state().rulesOverride.excludeSessions, undefined);
+
+  // 显式确认清空：写入显式空集
+  const confirmed = await f.call(RULES, { excludeSessions: [], confirmClearExclude: true, baseRevision: get.body.revision });
+  assert.equal(confirmed.status, 200, confirmed.body.error);
+  assert.deepEqual(f.state().rulesOverride.excludeSessions, []);
+  get = await f.call(RULES, undefined, 'GET');
+  assert.deepEqual(get.body.rules.excludeSessions, []);
+
+  // null = 恢复该字段继承配置
+  const inherit = await f.call(RULES, { excludeSessions: null, baseRevision: get.body.revision });
+  assert.equal(inherit.status, 200, inherit.body.error);
+  assert.deepEqual(f.state().rulesOverride.excludeSessions, undefined);
+  get = await f.call(RULES, undefined, 'GET');
+  assert.deepEqual(get.body.rules.excludeSessions, [EXCLUDED_SID], '恢复继承后基线拒绝规则必须回来');
+
+  // 重启后语义不变
+  await apply(f.mkCtx(), f.cfg);
+  get = await f.call(RULES, undefined, 'GET');
+  assert.deepEqual(get.body.rules.excludeSessions, [EXCLUDED_SID]);
+});
+
+test('排除规则收紧后在途摘要/详情请求立即被拒绝', async (t) => {
+  const f = await fixture(t);
+  const tight = await f.call(RULES, { excludeSessions: [f.sid], baseRevision: 0 });
+  assert.equal(tight.status, 200, tight.body.error);
+  const sum = await f.call('/api/dsh-wangchao/summaries', { sessionId: f.sid });
+  assert.notEqual(sum.body && sum.body.allowed, true, '撤权后摘要接口不得继续返回内容');
+});

@@ -88,15 +88,16 @@ test('F4 陈旧锁（持锁进程已退出）→ 原子接管，留审计，epoc
   assert.equal(fence.epoch, 8, '接管后 epoch 必须单调 +1，旧写者才能被 fencing');
   assert.ok(fs.existsSync(lockFile(dir)));
   const takenLock = JSON.parse(fs.readFileSync(lockFile(dir), 'utf8'));
-  assert.equal(takenLock.epoch, 8, '新锁必须带接管后的 epoch');
   assert.equal(takenLock.pid, process.pid);
+  assert.equal(takenLock.token.length > 0, true);
 
   const audit = fs.readFileSync(path.join(dir, LOCK_AUDIT_FILE), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  assert.equal(audit.length, 1, '接管必须留一条审计');
-  assert.equal(audit[0].action, 'takeover-stale-lock');
-  assert.equal(audit[0].deadPid, deadPid);
-  assert.equal(audit[0].previousEpoch, 7);
-  assert.equal(audit[0].nextEpoch, 8);
+  const committed = audit.filter((e) => e.action === 'takeover-stale-lock');
+  assert.equal(committed.length, 1, '接管必须留一条成功审计');
+  assert.equal(audit.filter((e) => e.action === 'takeover-claimed').length, 1, '必须先留认领意图');
+  assert.equal(committed[0].deadPid, deadPid);
+  assert.equal(committed[0].previousEpoch, 7);
+  assert.equal(committed[0].nextEpoch, 8);
 
   await fence.stop();
   assert.equal(fence.epoch, 9, '正常交接仍按 epoch+1');

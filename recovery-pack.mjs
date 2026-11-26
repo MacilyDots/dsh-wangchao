@@ -249,23 +249,29 @@ export function buildRecoveryPack({
 }
 
 /**
- * 导出前脱敏：恢复包只包含事实陈述与引用，不会话正文；
- * 事实文本仍可能由用户写入凭据形态字符串，统一走既有 scrubText。
+ * 导出前脱敏：恢复包只包含事实陈述与引用，不会话正文。
+ *
+ * 自由文本可以出现在任意字段（aliases、lifecycleEvents.reason/actor、coverageGaps、
+ * 引用 key、未来新增字段……），逐字段补丁必然漏。这里对整棵 JSON 做深度投影：
+ * 字符串统一走 scrubText，结构与标量原样保留，深度超限显式截断。
+ * Markdown 单独放宽上限（它是主要复制内容），同样脱敏。
  * 纯函数，保持 buildRecoveryPack 的确定性不变。
  */
+function scrubDeep(value, maxLen, depth = 0) {
+  if (typeof value === 'string') return scrubText(value, maxLen);
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= 8) return '[TRUNCATED]';
+  if (Array.isArray(value)) return value.map((v) => scrubDeep(v, maxLen, depth + 1));
+  /** @type {Record<string, any>} */
+  const out = {};
+  for (const [k, v] of Object.entries(value)) out[k] = scrubDeep(v, maxLen, depth + 1);
+  return out;
+}
+
 export function sanitizeRecoveryPack(pack, { maxLen = 2000 } = {}) {
   if (!pack || typeof pack !== 'object') return pack;
-  const clean = (v) => (typeof v === 'string' ? scrubText(v, maxLen) : v);
-  const scrubItem = (x) => ({
-    ...x,
-    statement: clean(x?.statement),
-    disputeReason: clean(x?.disputeReason ?? null),
-  });
-  const out = { ...pack, markdown: scrubText(pack.markdown, 20000) };
-  for (const k of ['title', 'originalQuestion', 'currentGoal']) out[k] = clean(pack[k]);
-  for (const k of ['confirmedConclusions', 'openHypotheses', 'deadEnds', 'stanceEvolution', 'openQuestions', 'modelSuggestions']) {
-    out[k] = Array.isArray(pack[k]) ? pack[k].map(scrubItem) : [];
-  }
-  out.coverageGaps = Array.isArray(pack.coverageGaps) ? pack.coverageGaps.map(clean) : [];
+  const out = scrubDeep(pack, maxLen);
+  // Markdown 是复制/预览的主内容，单独使用更长上限（仍然脱敏）。
+  if (typeof pack.markdown === 'string') out.markdown = scrubText(pack.markdown, 20000);
   return out;
 }

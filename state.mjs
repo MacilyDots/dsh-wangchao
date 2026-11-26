@@ -41,8 +41,9 @@ export function normalizeRuleSet(r) {
 /**
  * 规则合并：字段不存在 = 继承配置；显式空数组 = 该项授权集合为空；非空 = 覆盖。
  *
- * 旧格式（没有 rulesOverrideFormat=2 的历史数据）的空数组过去被当作「未设置」，
- * 为了不让老实例在升级后突然收紧，迁移时把这些空字段删除，等价于「未设置」。
+ * 旧格式（没有 rulesOverrideFormat=2 的历史数据）的空数组过去被当作「未设置」。
+ * 迁移时按维度区分（见 migrateRuleOverride）：允许维度保留空集（fail-closed），
+ * 拒绝维度删除空键改回继承（避免清掉配置基线里的拒绝规则）。
  * 新格式只认字段是否存在，不再用长度猜意图。
  *
  * @param {any} base 配置文件基线
@@ -67,23 +68,37 @@ export function mergeRules(base, override, format) {
 }
 
 /**
- * 旧格式迁移：打上显式格式标记。
+ * 旧格式迁移：按维度恢复「缺失 = 继承」，并打上显式格式标记。
  *
- * 旧数据无法区分「用户主动清空」与「历史上被 UI 顺手写入的空数组」。
- * 授权范围不明确时按 fail-closed 处理：空数组保留为「显式空集」，
- * 不用「继承配置基线」扩大采集范围。用户若本意是继承，可点「恢复配置文件基线」。
+ * 旧数据无法区分「用户主动清空」与「历史上被 UI 顺手写入的空数组」，因此按保守原则分维度处理：
+ *  - allowSessions / allowCwds：空数组保留为显式空集（收紧授权，不会因升级扩大范围）；
+ *  - excludeSessions / excludeCwds：空数组视为「未设置」并删除该键（继承配置基线的拒绝规则）；
+ *    若保留为空集，等于在升级时静默清掉基线里已有的拒绝项，反而扩大采集范围；
+ *  - 缺失字段：保持缺失（继承配置）；
+ *  - 非空拒绝规则：原样保留，不丢失任何已有拒绝项。
+ *
+ * 迁移幂等：已有 rulesOverrideFormat=2 的状态直接返回原对象。
  * @param {any} s
  * @returns {any}
  */
 export function migrateRuleOverride(s) {
   if (!s || typeof s !== 'object' || s.rulesOverride === undefined || s.rulesOverride === null) return s;
   if (Number(s.rulesOverrideFormat) === RULE_FORMAT_EXPLICIT) return s;
-  return {
-    ...s,
-    rulesOverride: normalizeRuleSet(s.rulesOverride),
-    rulesOverrideFormat: RULE_FORMAT_EXPLICIT,
-    rulesMigratedAt: Date.now(),
-  };
+  const legacy = s.rulesOverride;
+  const normalized = normalizeRuleSet(legacy);
+  /** @type {any} */
+  const migrated = {};
+  for (const k of Object.keys(legacy)) {
+    if (!RULE_KEYS.includes(k) || !Array.isArray(legacy[k])) continue;
+    const nonEmpty = normalized[k].length > 0;
+    if (nonEmpty) { migrated[k] = normalized[k]; continue; }
+    // 空数组：允许维度保留显式空集；拒绝维度删除，继承基线拒绝规则。
+    if (k === 'allowSessions' || k === 'allowCwds') migrated[k] = [];
+  }
+  const out = { ...s, rulesOverrideFormat: RULE_FORMAT_EXPLICIT, rulesMigratedAt: Date.now() };
+  if (Object.keys(migrated).length) out.rulesOverride = migrated;
+  else delete out.rulesOverride;
+  return out;
 }
 
 /** 全新的空状态（首次启动或损坏后的占位）。 */

@@ -239,9 +239,17 @@ globalThis.fetch = async (url, init) => {
     });
   }
   if (url === '/api/dsh-wangchao/rules') {
+    if (method === 'POST') {
+      return jsonResponse({
+        ok: true,
+        rules: { allowCwds: ['B:/new'], excludeCwds: ['B:/secret'], allowSessions: [], excludeSessions: [] },
+        source: 'override', revision: 1,
+      });
+    }
     return jsonResponse({
-      rules: { allowCwds: [], excludeCwds: [], allowSessions: [], excludeSessions: [] },
-      source: 'config', revision: 0, stateCorrupt: false,
+      rules: { allowCwds: ['B:/allowed'], excludeCwds: ['B:/secret'], allowSessions: [], excludeSessions: [] },
+      config: { allowCwds: ['B:/allowed'], excludeCwds: ['B:/secret'], allowSessions: [], excludeSessions: [] },
+      source: 'override', explicitFields: ['allowCwds'], revision: 0, stateCorrupt: false,
     });
   }
   if (url === '/api/dsh-wangchao/work') {
@@ -625,6 +633,59 @@ await t('关闭抽屉后引用面板与摘要一起消失，面板定时器与�
   // 引用面板的 15s 轮询必须消失；御书房常驻报条轮询（loadBar）不在抽屉内，保留 1 个属预期
   assert.equal(active15.size, base15, '抽屉关闭后只剩御书房常驻轮询，实际 ' + active15.size);
   assert.equal(docListeners.visibilitychange.length, 0);
+  assert.deepEqual(errors, []);
+});
+
+await t('采集范围：稀疏保存、来源标注与清除排除规则确认', async () => {
+  resetErrors();
+  const scopeBtn = byText('采集范围')[0];
+  assert.ok(scopeBtn, '缺少采集范围入口');
+  scopeBtn.click();
+  await settle();
+  const txt = textOf();
+  assert.match(txt, /来源：面板覆盖/, 'allowCwds 应显示面板覆盖来源');
+  assert.match(txt, /来源：继承配置基线/, 'excludeCwds 应显示继承来源');
+  assert.match(txt, /我明确要清除继承的排除规则/);
+
+  const areas = byClass('ldr-textarea');
+  assert.ok(areas.length >= 4, '应有四个规则文本框');
+  const fire = (el) => { for (const fn of el._listeners.get('input') ?? []) fn({ target: el }); };
+
+  // 只编辑 allowCwds：提交体不得包含其他三个字段
+  areas[0].value = 'B:/new';
+  fire(areas[0]);
+  await settle();
+  const before = requests.length;
+  byText('保存规则（仅提交已编辑字段）')[0].click();
+  await settle(12);
+  const posts = requests.slice(before).filter((r) => r.url === '/api/dsh-wangchao/rules' && r.method === 'POST');
+  assert.equal(posts.length, 1, '应只提交一次规则保存');
+  assert.deepEqual(Object.keys(posts[0].body).sort(), ['allowCwds', 'baseRevision']);
+  assert.deepEqual(posts[0].body.allowCwds, ['B:/new']);
+
+  // 清空继承的 excludeCwds：未勾选确认时必须被前端拦截，不发请求
+  areas[1].value = '';
+  fire(areas[1]);
+  await settle();
+  const before2 = requests.length;
+  byText('保存规则（仅提交已编辑字段）')[0].click();
+  await settle(8);
+  assert.match(textOf(), /请先勾选/);
+  assert.equal(requests.slice(before2).filter((r) => r.url === '/api/dsh-wangchao/rules' && r.method === 'POST').length, 0, '未确认不得提交清空排除');
+
+  // 勾选确认后允许提交，并带 confirmClearExclude
+  const cb = all().find((n) => n.tagName === 'INPUT' && n.getAttribute('type') === 'checkbox' && n._listeners.has('input'));
+  assert.ok(cb, '缺少确认复选框');
+  cb.checked = true;
+  fire(cb);
+  await settle();
+  const before3 = requests.length;
+  byText('保存规则（仅提交已编辑字段）')[0].click();
+  await settle(12);
+  const posts3 = requests.slice(before3).filter((r) => r.url === '/api/dsh-wangchao/rules' && r.method === 'POST');
+  assert.equal(posts3.length, 1);
+  assert.deepEqual(posts3[0].body.excludeCwds, []);
+  assert.equal(posts3[0].body.confirmClearExclude, true);
   assert.deepEqual(errors, []);
 });
 
