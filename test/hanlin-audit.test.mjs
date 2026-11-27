@@ -70,14 +70,15 @@ async function fixture(t) {
   };
 }
 
-test('成功生成：写 outcome 审计（generated），含身份/日期/路由，不含正文', async (t) => {
+test('成功生成：写 outcome 审计（generated），来源标为 deterministic，不含正文', async (t) => {
   const f = await fixture(t);
-  const p = f.call({ requestId: 'ha-1', force: true });
-  await f.entered(); f.release();
-  const r = await p;
+  const r = await f.call({ requestId: 'ha-1', force: true });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.audit.generation, 'generated');
   assert.equal(r.body.audit.cached, false);
+  // 隔离 fake 路由不走 llm（真实宿主没有 fake adapter，见 D-05）：
+  // 走本地确定性摘要，来源必须可归因为不确定的「非模型」。
+  assert.equal(f.calls, 0, '确定性摘要不得调用 llm');
   const audit = f.readAudit();
   assert.ok(audit && Array.isArray(audit.events));
   const ev = audit.events.find((e) => e.kind === 'outcome' && String(e.taskId).startsWith('hanlin-digest:ha-1'));
@@ -85,8 +86,8 @@ test('成功生成：写 outcome 审计（generated），含身份/日期/路由
   const detail = JSON.parse(ev.detail);
   assert.equal(detail.generation, 'generated');
   assert.equal(detail.cached, false);
-  assert.equal(detail.source, 'fake');
-  assert.equal(detail.model, 'fake-1');
+  assert.equal(detail.source, 'deterministic');
+  assert.equal(detail.model, null);
   assert.equal(detail.dateKey, r.body.dateKey);
   assert.equal(detail.appliedSessions, 1);
   assert.ok(Number.isFinite(detail.at));
@@ -95,9 +96,7 @@ test('成功生成：写 outcome 审计（generated），含身份/日期/路由
 
 test('缓存复用：写 outcome 审计（reused），且不再次调用模型', async (t) => {
   const f = await fixture(t);
-  const p1 = f.call({ requestId: 'ha-2', force: true });
-  await f.entered(); f.release();
-  assert.equal((await p1).status, 200);
+  assert.equal((await f.call({ requestId: 'ha-2', force: true })).status, 200);
   const callsAfterFirst = f.calls;
   const r2 = await f.call({ requestId: 'ha-3', force: false });
   assert.equal(r2.status, 200, JSON.stringify(r2.body));
@@ -113,14 +112,13 @@ test('缓存复用：写 outcome 审计（reused），且不再次调用模型',
 test('审计失败：返回 500 audit-failed，不写缓存、不返回正文、不重试', async (t) => {
   const f = await fixture(t);
   const p = f.call({ requestId: 'ha-4', force: true });
-  await f.entered();
   const rename = fs.renameSync;
   fs.renameSync = function (from, to) {
     if (String(to).endsWith('chief-analysis-audit.json')) throw new Error('synthetic audit failure');
     return rename.apply(this, arguments);
   };
   let r;
-  try { f.release(); r = await p; } finally { fs.renameSync = rename; }
+  try { r = await p; } finally { fs.renameSync = rename; }
   assert.equal(r.status, 500);
   assert.equal(r.body.code, 'audit-failed');
   assert.equal(r.body.cachePersisted, false);
@@ -128,5 +126,5 @@ test('审计失败：返回 500 audit-failed，不写缓存、不返回正文、
   assert.equal(r.body.retryable, false);
   assert.equal(r.body.draft, undefined, '不得返回正文');
   assert.equal(Object.keys(f.readState().hanlinDigests ?? {}).length, 0, '缓存不得落盘');
-  assert.equal(f.calls, 1, '不得自动重发（模型只被调用一次）');
+  assert.equal(f.calls, 0, '确定性路径不调模型，更不得自动重发');
 });

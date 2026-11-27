@@ -2,7 +2,7 @@
 //
 // 定位：**薄补位器**，不是第二个任务存储。任务状态、依赖、并发上限、取消与终态
 // 全部由 task-store 持久化并判定；本模块只在状态变化后反复询问 store「下一个可派发
-// 任务」，按 createdAt 顺序调用 store.dispatch，派发结束自动补位。重启语义沿用 R7：
+// 任务」，按 createdAt 顺序调用 store.dispatch，派发结束自动补位。重启语义：
 // running → unknown、confirmed → failed，不自动续跑。
 //
 // 预算/安全包装点：`interceptExecute` 在每次真正调用执行桥之前执行，参数

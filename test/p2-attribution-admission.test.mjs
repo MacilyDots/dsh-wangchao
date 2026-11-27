@@ -128,12 +128,12 @@ test('P2-2 翰林院准入前移：同一拒绝语义且不调用模型', async 
   assert.equal(f.llmCalls.length, 0);
 });
 
-test('fake 路径回归：翰林院归因 fake/fake-1 且正常返回', async (t) => {
+test('隔离翰林院不调用模型，明确返回确定性统计', async (t) => {
   const f = await fixture(t, { realModel: false });
-  const p = f.call('/api/dsh-wangchao/hanlin/digest', { requestId: 'h2', force: true });
-  await f.entered(); f.release();
-  const r = await p;
+  const r = await f.call('/api/dsh-wangchao/hanlin/digest', { requestId: 'h2', force: true });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.equal(r.body.draft.source, 'fake');
-  assert.equal(r.body.draft.model, 'fake-1');
+  assert.equal(r.body.draft.source, 'deterministic');
+  assert.equal(r.body.draft.model, null);
+  assert.equal(r.body.draft.fallback, true);
+  assert.equal(f.llmCalls.length, 0);
 });

@@ -273,7 +273,7 @@ globalThis.fetch = async (url, init) => {
     return dispatchProjectRoute(url, method, body);
   }
   if (typeof url === 'string' && (url === '/api/dsh-wangchao/project' || url.indexOf('/api/dsh-wangchao/project?') === 0 || url.indexOf('/api/dsh-wangchao/project/') === 0)) return dispatchProjectRoute(url, method, body);
-  if (url === '/api/dsh-wangchao/role/message') return jsonResponse({ ok: true, msgId: 'test-message' });
+  if (url === '/api/dsh-wangchao/role/message') return jsonResponse({ ok: true, msgId: 'test-message', state: 'accepted', delivered: true, clientMessageId: body && body.clientMessageId });
   if (url === '/api/dsh-wangchao/overview') {
     return jsonResponse({
       generatedAt: now, pollCount: 3, observeOnly: true, stalePending: false,
@@ -518,7 +518,7 @@ await t('输入消息并发送到角色接口', async () => {
   assert.equal(request?.body?.roleId, 'chief');
   assert.equal(request?.body?.text, '测试消息');
   assert.ok(request?.body?.clientMessageId);
-  assert.match(textOf(), /已投递给首辅/);
+  assert.match(textOf(), /已送达首辅会话/);
 });
 
 await t('主窗展开按钮调用桥接口并显示结果', async () => {

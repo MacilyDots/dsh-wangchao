@@ -59,7 +59,7 @@ export function auditGuardGate(s = {}) {
     out.push(finding('policy.not-ok', execEnabled ? 'violation' : 'unknown',
       execEnabled ? '执行已启用但策略预检未通过' : '执行未启用，策略未配置（正常默认态）'));
   }
-  // restart-blocked 与守卫是否安装无关，独立判定（审查 P1-6）
+  // restart-blocked 与守卫是否安装无关，独立判定
   if (isObj(s.lifecycle) && s.lifecycle.blocked === true) {
     out.push(finding('lifecycle.restart-blocked', 'unknown', '存在未确认停止的执行记录，派发应被阻断'));
   }
@@ -120,7 +120,7 @@ export function auditSummaryCoverage(s = {}) {
       }
     }
   }
-  // 反向一致性：run.state='unknown' 却没有 summaryUnknown 条目 = 待确认队列被隐藏（审查 P1-5）
+  // 反向一致性：run.state='unknown' 却没有 summaryUnknown 条目 = 待确认队列被隐藏
   if (hasRuns) {
     for (const [sid, runs] of Object.entries(s.runs)) {
       if (!Array.isArray(runs)) continue;
@@ -133,7 +133,7 @@ export function auditSummaryCoverage(s = {}) {
       }
     }
   }
-  // unknown 记录：run 不在快照=unknown（可能截断）；存在但状态被改写=violation（审查 P1-4）
+  // unknown 记录：run 不在快照=unknown（可能截断）；存在但状态被改写=violation
   if (hasRuns) {
     for (const [sid, list] of Object.entries(unknown)) {
       if (!Array.isArray(list)) {
@@ -206,7 +206,7 @@ export function auditBudgetTask(s = {}) {
     }
   }
 
-  // governance：task 级 1:1；running 任务必须有对应预留或结算（审查 P0-1）
+  // governance：task 级 1:1；running 任务必须有对应预留或结算
   if (gov && tasks) {
     const byTask = new Map();
     const seen = new Map(); // taskId → 该任务的全部账本记录（含下标），供 dup 证据使用
@@ -240,7 +240,7 @@ export function auditBudgetTask(s = {}) {
     }
   }
 
-  // writerEpoch：failClosed 是 string|null（审查 P0-3）；fail-closed 时不应仍有 exec reserved
+  // writerEpoch：failClosed 是 string|null；fail-closed 时不应仍有 exec reserved
   const w = s.writerEpoch;
   if (!isObj(w)) {
     out.push(finding('writer.epoch-unknown', 'unknown', '未提供 writerEpoch 快照'));
@@ -262,7 +262,7 @@ export function auditAdmission(s = {}) {
     return out;
   }
   const revoked = new Set(idList(s.revokedIds));
-  const chiefs = new Set(idList(s.chiefIds)); // 精确登记 id，不用前缀（审查 P1-5）
+  const chiefs = new Set(idList(s.chiefIds)); // 精确登记 id，不用前缀
   // 撤权会话作为历史合法保留，不进入对外可见列表；这些 id 的摘要键也合法留存。
   // 只有「未撤权且从未授权」的摘要快照才是越权暴露。
   const historical = new Set([...revoked, ...chiefs]);

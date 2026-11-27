@@ -240,7 +240,7 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
       // 灵感按来源会话实时判权：撤权后不得再显示来自该会话的候选。
       ideas: (data.ideas ?? []).filter((i) => !i.sourceSessionId || permitted(i.sourceSessionId)).map((i) => ({ ...i })),
       facts,
-      // P1-3：change 的目标事实可见，且其声明的跨事实依赖（dependsOnFactId）也必须可见，
+      // change 的目标事实可见，且其声明的跨事实依赖（dependsOnFactId）也必须可见，
       // 否则整条 change 隐藏（reason/before/after 可能含受限事实信息）。
       changes: data.changes.filter((c) => visibleFactIds.has(c.factId)
         && (!c.dependsOnFactId || visibleFactIds.has(c.dependsOnFactId))).map((c) => ({ ...c })),
@@ -291,7 +291,7 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
       // 写路径：此刻锁是本操作刚取得的，任何符合格式的 tmp 都是遗留孤儿，必须拒绝写入。
       assertNoOrphans({ ignoreLiveLock: false });
       const data = read({ checkOrphans: false });
-      // P1-2：基于锁内实际读到的数据判权；read 抛错会走 finally 释放锁并向上传播，
+      // 基于锁内实际读到的数据判权；read 抛错会走 finally 释放锁并向上传播，
       // 不会被解释为“无需判权”。此检查必须先于 revision 冲突检查。
       if (getAccessIds) for (const id of getAccessIds(data)) requireAccess(id);
       if (!opts.skipRevisionCheck && data[checkField] !== expectedRevision) {
@@ -331,7 +331,7 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
     if (!f) fail('NOT_FOUND', '事实不存在');
     return f;
   };
-  // P1-2：从锁内读到的数据提取事实证据会话，供 mutate 在持锁状态下判权。
+  // 从锁内读到的数据提取事实证据会话，供 mutate 在持锁状态下判权。
   // 纯函数，不做任何 IO；事实不存在时返回 []，随后 fact() 会抛 NOT_FOUND。
   const factSessionIds = (data, factId) => {
     const f = data.facts.find((x) => x.factId === factId);
@@ -581,18 +581,18 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
       if (!nonempty(actor)) fail('INVALID', '必须提供 actor');
       if (!FACT_KINDS.has(kind)) fail('INVALID', `事实类型无效：${kind}`);
       if (!nonempty(statement)) fail('INVALID', '必须提供 statement');
-      // P2-7：会话授权检查必须在摘要校验之前，避免通过错误类型探测摘要版本存在性。
+      // 会话授权检查必须在摘要校验之前，避免通过错误类型探测摘要版本存在性。
       const evidenceSessions = [...new Set(evidence
         .filter((ev) => obj(ev) && ['session_ref', 'summary_version', 'tool_result'].includes(ev.kind))
         .map((ev) => ev.sessionId))];
       for (const id of evidenceSessions) requireAccess(id);
       const factId = randomUUID();
       const now = new Date().toISOString();
-      // P2-3/P2-4：只归一一次——原始 evidence 直接交给 normalizeFact（内部调用 normalizeEvidence），
+      // 只归一一次——原始 evidence 直接交给 normalizeFact（内部调用 normalizeEvidence），
       // 避免二次归一丢 manual.at，也避免 summary_version 的 verifySummary 被调用两次。
       return mutate(expectedRevision, (data, rev) => {
         project(data, projectId);
-        // P0-2：查重只在当前授权可见的事实里做，且错误信息不回显隐藏事实的 status/factId。
+        // 查重只在当前授权可见的事实里做，且错误信息不回显隐藏事实的 status/factId。
         if (nonempty(factKey)) {
           const visibleFacts = filterFactsForVisibility(data.facts, canAccessSession);
           const dup = visibleFacts.find((f) => f.projectId === projectId && f.factKey === factKey && f.status !== 'superseded');
@@ -663,7 +663,7 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
         const before = f.status;
         f.status = 'disputed';
         f.disputeReason = reason;
-        f.confirmedBy = null; // P1-6：否决后清除原确认背书，避免存储层仍带 confirmedBy
+        f.confirmedBy = null; // 否决后清除原确认背书，避免存储层仍带 confirmedBy
         f.revision = rev;
         appendChange(data, projectId, 'rejected', factId, before, 'disputed', reason, actor, rev);
         return true;
@@ -683,7 +683,7 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
         const before = f.statement;
         const beforeStatus = f.status;
         f.statement = statement;
-        // P1-6：已确认事实的文案被人工纠正后，确认背书不能沿用；降级为 candidate 并清除背书。
+        // 已确认事实的文案被人工纠正后，确认背书不能沿用；降级为 candidate 并清除背书。
         if (f.status === 'confirmed') {
           f.status = 'candidate';
           f.confirmedBy = null;
@@ -711,8 +711,8 @@ export function createProjectStore({ file, canAccessSession, verifySummary } = {
         f.status = 'superseded';
         f.supersededBy = byFactId;
         f.revision = rev;
-        // P1-1：confirmedBy 作为历史确认记录保留（校验层已允许 superseded 保留背书）。
-        // P1-3：跨事实取代的审计显式声明对取代目标的依赖；目标撤权时该 change 一并隐藏，
+        // confirmedBy 作为历史确认记录保留（校验层已允许 superseded 保留背书）。
+        // 跨事实取代的审计显式声明对取代目标的依赖；目标撤权时该 change 一并隐藏，
         // 避免 reason/before/after 泄露受限事实 B 的信息。
         const change = makeChange({ projectId, kind: 'superseded', factId, before, after: 'superseded', reason, actor, at: new Date().toISOString() });
         change.dependsOnFactId = byFactId;

@@ -74,7 +74,7 @@ export function validateFactShape(f) {
   if (!nonempty(f.recordedAt)) factsFail('CORRUPT', '事实缺 recordedAt');
   if (f.origin !== 'manual' && f.origin !== 'suggested') factsFail('CORRUPT', 'origin 必须是 manual/suggested');
   if (f.confirmedBy !== null && f.confirmedBy !== undefined && !nonempty(f.confirmedBy)) factsFail('CORRUPT', 'confirmedBy 类型错误');
-  // P1-1/P1-6 纵深防御：candidate/disputed 不得残留确认背书（纠正/否决后应清除）。
+  // 纵深防御：candidate/disputed 不得残留确认背书（纠正/否决后应清除）。
   // superseded 保留 confirmedBy 是合法的历史确认记录：事实被取代不抹掉它曾被人工确认的事实。
   // 不强制 confirmed 必须有 confirmedBy，避免拒绝修复前的旧数据迁移。
   if (['candidate', 'disputed'].includes(f.status) && nonempty(f.confirmedBy)) factsFail('CORRUPT', `${f.status} 事实残留 confirmedBy`);

@@ -1,6 +1,6 @@
 {
   "name": "dsh-wangchao",
-  "version": "0.5.0-alpha.5.1",
+  "version": "0.5.0-alpha.5.2",
   "private": false,
   "type": "module",
   "description": "DeepSeek Harness 跨会话总控插件（御书房）：白名单冷热采集、可追溯摘要与修订、只读首辅及受控任务调度（Fail-Closed）。",

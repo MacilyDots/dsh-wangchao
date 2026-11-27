@@ -45,7 +45,7 @@
 export function createPollDomain(deps) {
   const { probeSessionIndex, persistenceService, rules: initialRules, rulesNow, liveRuntime, isChiefSession, pendingMark, maxPerPoll, state, stateLoadIssue, persistState, ctx, decideAccess, isAllowed, fs, createLiveStreams, saveState } = deps;
   // 规则是权限边界：每次判权都读当前值，不能沿用域创建时的快照。
-  // 否则面板收紧规则后，轮询仍按旧授权继续读取并写盘（P0-1 实测缺陷）。
+  // 否则面板收紧规则后，轮询仍按旧授权继续读取并写盘（实测缺陷）。
   const currentRules = () => (typeof rulesNow === 'function' ? rulesNow() : initialRules);
 
   /**
@@ -186,7 +186,7 @@ export function createPollDomain(deps) {
 
   /** 轮询：按「最久未同步」排序，避免固定只读列表开头那批 */
   const RETRY_UNAVAILABLE_MS = 30 * 60 * 1000;
-  // R5：报告裁剪。raw report 的 skipped/failed/deferred 逐条带会话 id，整份落盘会泄露
+  // 报告裁剪。raw report 的 skipped/failed/deferred 逐条带会话 id，整份落盘会泄露
   // 未授权会话清单（startupReport 曾整份落盘，实测出现 587 条 id）。只保留计数与原因分类。
   /** @param {any} report */
   const trimPollReport = (report) => {
@@ -362,9 +362,9 @@ export function createPollDomain(deps) {
           const rec = state.sessions[item.id];
           if (rec) { delete rec.status; delete rec.error; delete rec.failedAt; }
           // 记下**读取之前**观测到的 revision / sizeBytes。
-          // 不能记读取之后的：如果本次读取期间会话又追加了事件，磁盘已变成 R2，
-          // 而本次读到的内容只覆盖到 R1。记 R1 会让下一轮看到 R2 ≠ R1 → 必然重读，
-          // 新事件不会漏；记 R2 则会误跳过那批追加。
+          // 不能记读取之后的：如果本次读取期间会话又追加了事件，磁盘上已经是新状态，
+          // 而本次读到的内容只覆盖到旧状态。记旧值会让下一轮看到「磁盘 ≠ 记录」→ 必然重读，
+          // 新事件不会漏；记新值则会误跳过那批追加。
           if (rec && typeof curRev === 'string') { rec.rev = curRev; delete rec.lastSkip; }
           if (rec && typeof curSize === 'number') { rec.sizeBytes = curSize; }
           // 真实读取也是一次检查：同步刷新 lastCheckAt，避免它长期陈旧

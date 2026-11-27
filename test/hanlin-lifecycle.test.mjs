@@ -15,7 +15,14 @@ async function fixture(t, { denyAccess = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-hanlin-life-'));
   const home = path.join(dir, 'home'); fs.mkdirSync(home);
   const oldHome = process.env.DSH_HOME; process.env.DSH_HOME = home;
-  t.after(() => { if (oldHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = oldHome; fs.rmSync(dir, { recursive: true, force: true }); });
+  // 合成凭据名（值不是真实密钥）：真实模型准入只检查「引用是否可解析」，不读值。
+  const credEnv = 'AP09_SYNTHETIC_KEY';
+  const oldCred = process.env[credEnv]; process.env[credEnv] = 'synthetic-placeholder-not-a-key';
+  t.after(() => {
+    if (oldHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = oldHome;
+    if (oldCred === undefined) delete process.env[credEnv]; else process.env[credEnv] = oldCred;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   const sid = 'session-33333333-3333-4333-8333-333333333333';
   const now = Date.now();
   const state = {
@@ -33,7 +40,8 @@ async function fixture(t, { denyAccess = false } = {}) {
     agents: { get: () => null, create: async () => { throw new Error('not used'); } }, agentLoop: {},
     llm: {
       prepareCall: async ({ provider, model }) => {
-        assert.equal(provider, 'fake'); assert.equal(model, 'fake-1');
+        // 真实模型路径必须真的走到 llm：这正是本文件要测的「模型流在途」前提。
+        assert.equal(provider, 'deepseek-official'); assert.equal(model, 'deepseek-flash');
         return { config: {}, stream: async function* (opts) {
           calls += 1; signal = opts.signal; entered.resolve();
           await release.promise;
@@ -49,7 +57,10 @@ async function fixture(t, { denyAccess = false } = {}) {
     timer: { interval: () => ({ dispose() {} }) },
     connection: { fetch: { register: (d) => { routes.set(d.path, d); return () => {}; } }, authenticatedUrl: (u) => u },
     get(n) { return n === 'connection' ? this.connection : services[n]; },
-    root: { get: (n) => (n === 'tools' ? host.tools : services[n]) },
+    // 真实模型路径要求预算门禁可安装（execGate.install 走 ctx.root.on）。
+    // 缺 on 时门禁建立失败、被 catch 静默置空，真实路径会一直 409 —— 这是离线测试
+    // 长期没覆盖真实路径的原因之一，补上才测得到。
+    root: { get: (n) => (n === 'tools' ? host.tools : services[n]), on: () => () => {} },
     inject: (names, fn) => { fn(Object.fromEntries(names.map((n) => [n, services[n]]))); return () => {}; },
     effect: (fn) => { fn(); return () => {}; }, on: () => () => {}, logger: { warn() {}, error() {}, info() {} },
   };
@@ -58,8 +69,16 @@ async function fixture(t, { denyAccess = false } = {}) {
     // 撤权用「实时判权拒绝」模拟：从 allowSessions 移除（命中时 decideAccess 不再看 cwd）
     allowSessions: denyAccess ? [] : [sid], allowCwds: denyAccess ? [] : [dir],
     pollIntervalMs: 600000,
-    hanlinDigestEnabled: true, hanlinProvider: 'fake', hanlinModel: 'fake-1', isolatedTestExecution: true,
-    censorateEnforce: false, execEnabled: false,
+    // 本文件测的是「模型流在途时」的中断语义（取消 / 冻结 / 撤权）。
+    // alpha.5.2 起隔离 fake 路径改走本地确定性摘要（没有流可中断，见 D-05），
+    // 因此这里显式切到真实路由 + 合成凭据 + 预算门禁，让 runner 真实存在。
+    // 断言 provider/model 仍是配置值，顺带证明真实路径没有被 fake 化。
+    realModelEnabled: true,
+    realModelProvider: 'deepseek-official', realModelModel: 'deepseek-flash',
+    realModelApiKeyEnv: 'AP09_SYNTHETIC_KEY', realModelMaxTokens: 512,
+    hanlinDigestEnabled: true, isolatedTestExecution: true,
+    budgetLimitUsd: 1, budgetSingleUsd: 0.05,
+    censorateEnforce: false, execEnabled: false, execAutoApprove: { enabled: false },
   };
   await apply(ctx, cfg);
   const call = async (p, body) => {
@@ -165,9 +184,13 @@ test('翰林院取消审计失败：明确 500 audit-failed 且已中止', async
   const f = await fixture(t);
   const p = f.digest({ requestId: 'r-audit' });
   await f.entered();
+  // 审计落点取决于是否配了预算门禁：配了走 governance.json，否则 chief-analysis-audit.json。
+  // 本文件的 fixture 走真实模型路径（必须配预算），所以要连 governance.json 一起拦。
+  const AUDIT_FILES = ['chief-analysis-audit.json', 'governance.json'];
   const rename = fs.renameSync;
   fs.renameSync = function (from, to) {
-    if (String(to).endsWith('chief-analysis-audit.json')) throw new Error('synthetic audit failure');
+    const target = String(to);
+    if (AUDIT_FILES.some((n) => target.endsWith(n))) throw new Error('synthetic audit failure');
     return rename.apply(this, arguments);
   };
   let res;

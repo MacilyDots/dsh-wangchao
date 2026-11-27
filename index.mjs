@@ -2294,7 +2294,7 @@ export async function apply(ctx, config) {
           }
           return n;
         })(),
-        // P4-02：普通 agent 可见的 status 不暴露全局 unknownRecoveredAtStartup；
+        // 普通 agent 可见的 status 不暴露全局 unknownRecoveredAtStartup；
         // recoveryIncomplete 严格为布尔值，仅由顶层容器异常或当前实时授权会话的异常派生；
         // 索引不可用时通过 recoveryState='unavailable' 明确表达，避免字符串冒充布尔值。
         ...(() => {
@@ -3330,7 +3330,10 @@ export async function apply(ctx, config) {
           };
           if (action === 'summon') {
             const r = await chiefSummon();
-            if (r?.ok && r.sessionId) return json({ ...r, summonedAtSeq: await latestSeqOf(r.sessionId) });
+            // chiefSummon 把会话 id 放在 chief.sessionId 里；顶层没有再补一份，
+            // 旧代码据此判断 r.sessionId 永远为 undefined，summonedAtSeq 基线也就永远不返回。
+            const sid = r?.sessionId ?? r?.chief?.sessionId ?? null;
+            if (r?.ok && sid) return json({ ...r, sessionId: sid, summonedAtSeq: await latestSeqOf(sid) });
             return json(r);
           }
           if (action === 'fresh') {
@@ -3351,7 +3354,8 @@ export async function apply(ctx, config) {
               if (!wFresh.ok) return json({ ok: false, fresh: false, error: '新开议事时清理旧首辅登记失败：' + (wFresh.error || '未知原因') }, 500);
             }
             const r = await chiefSummon();
-            return json(r?.ok ? { ...r, fresh: true, summonedAtSeq: -1, newSessionId: r.sessionId } : r);
+            const freshSid = r?.sessionId ?? r?.chief?.sessionId ?? null;
+            return json(r?.ok ? { ...r, sessionId: freshSid, fresh: true, summonedAtSeq: -1, newSessionId: freshSid } : r);
           }
           if (action === 'release') return json(await chiefRelease());
           return json({ ok: false, error: '未知 action：只支持 summon / fresh / release' }, 400);
@@ -3481,8 +3485,14 @@ export async function apply(ctx, config) {
           }
           let body = {};
           try { body = await request.json(); } catch { return json({ ok: false, error: '请求体不是有效 JSON' }, 400); }
+          // 真实模型路径才需要 llm 服务。隔离 fake 路径改走本地确定性摘要，不依赖宿主 adapter：
+          // 真实 DSH 宿主没有 fake provider adapter，旧实现会对 llm.prepareCall({provider:'fake'})
+          // 直接报 "no adapter registered for provider \"fake\""，把整条隔离摘要路由变成 502。
+          const useRealModel = cfg.realModelEnabled === true;
           const llm = ctx.get('llm');
-          if (!llm || typeof llm.prepareCall !== 'function') return json({ ok: false, error: 'llm 服务不可用' }, 503);
+          if (useRealModel && (!llm || typeof llm.prepareCall !== 'function')) {
+            return json({ ok: false, code: 'llm-unavailable', error: 'llm 服务不可用' }, 503);
+          }
           const now = Date.now();
           const applied = appliedSessionsForDateDetailed(state.summaryRuns, now);
           if (applied.incomplete) return json({ ok: false, code: 'coverage-incomplete', error: '摘要覆盖记录不完整，拒绝生成' }, 503);
@@ -3542,12 +3552,16 @@ export async function apply(ctx, config) {
           const filteredRuns = {};
           for (const sid of allowedIds) if (state.summaryRuns?.[sid] !== undefined) filteredRuns[sid] = state.summaryRuns[sid];
           const filteredState = { ...state, summaryRuns: filteredRuns };
-          const runner = async ({ stats }) => {
-            const useReal = cfg.realModelEnabled === true;
+          // 隔离 fake 路由（isolatedTestExecution + hanlinProvider=fake）不走 llm：
+          // runner 置 null，让 generateHanlinDigest 走它内置的确定性摘要
+          // （source='deterministic'、model=null、fallback=true）。既不调真实模型，
+          // 也不伪造模型输出；来源在审计与 UI 上都可归因。
+          // 真实模型路径（realModelEnabled===true）完全不变：仍经 llm + 预算与身份门禁。
+          const runner = useRealModel ? async ({ stats }) => {
             const prepared = await llm.prepareCall({
-              provider: useReal ? cfg.realModelProvider : 'fake',
-              model: useReal ? cfg.realModelModel : 'fake-1',
-              maxTokens: useReal ? (cfg.realModelMaxTokens ?? 512) : 512,
+              provider: cfg.realModelProvider,
+              model: cfg.realModelModel,
+              maxTokens: cfg.realModelMaxTokens ?? 512,
             });
             if (controller.signal.aborted) throw new Error('摘要已取消');
             // prepareCall 在途冻结/撤权：不启动模型流
@@ -3567,10 +3581,10 @@ export async function apply(ctx, config) {
               assertHanlinAllowed();
               if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text;
             }
-            if (!text.trim()) throw new Error('模型未返回正文文本（provider=' + (useReal ? cfg.realModelProvider : 'fake') + '，可能思考占用输出额度或响应无 text 块）');
-            // 归因使用服务端实际下发的 provider/model（useReal 来自配置，不接受请求体覆盖）
-            return { text, source: useReal ? cfg.realModelProvider : 'fake', model: useReal ? cfg.realModelModel : 'fake-1' };
-          };
+            if (!text.trim()) throw new Error('模型未返回正文文本（provider=' + cfg.realModelProvider + '，可能思考占用输出额度或响应无 text 块）');
+            // 归因使用服务端实际下发的 provider/model（useRealModel 来自配置，不接受请求体覆盖）
+            return { text, source: cfg.realModelProvider, model: cfg.realModelModel };
+          } : null;
           try {
             const out = await generateHanlinDigest({ state: filteredState, now, sessionIds: allowedIds, runner, force: body.force === true });
             if (!out.ok) {
@@ -3589,6 +3603,8 @@ export async function apply(ctx, config) {
               dateKey: out.dateKey,
               cached: out.cached === true,
               generation: out.cached === true ? 'reused' : 'generated',
+              // 归因：生成主体。deterministic = 本地确定性统计，未调用模型（非伪造模型输出）。
+              generatedBy: out.draft?.fallback === true ? 'deterministic' : 'model',
               source: typeof out.draft?.source === 'string' ? out.draft.source : null,
               model: typeof out.draft?.model === 'string' ? out.draft.model : null,
               appliedSessions: allowedIds.length,
@@ -3701,7 +3717,23 @@ export async function apply(ctx, config) {
         const llm = ctx.get('llm');
         if (!llm || typeof llm.prepareCall !== 'function') throw new Error('llm 服务不可用');
         if (signal?.aborted) throw new Error('分析已取消');
-        const prepared = await llm.prepareCall({ provider: servedProvider, model: servedModel, maxTokens: servedMaxTokens });
+        // 隔离 fake 路由与翰林院摘要同源问题：真实宿主没有 provider "fake" 的 adapter，
+        // prepareCall 会抛「no adapter registered for provider "fake"」。这属于「该路由在本宿主
+        // 不可用」，必须报成可识别的不可用状态 + 配置指引，不能伪装成供应商故障、也不能伪造分析正文。
+        let prepared;
+        try {
+          prepared = await llm.prepareCall({ provider: servedProvider, model: servedModel, maxTokens: servedMaxTokens });
+        } catch (e) {
+          const raw = String(/** @type {any} */ (e)?.message ?? e);
+          if (servedProvider === 'fake') {
+            throw Object.assign(new Error(
+              '首辅分析不可用：本宿主没有注册 provider "fake" 的适配器，隔离假模型路由只能在离线测试中使用。'
+              + '真实分析请启用真实模型路由（realModelEnabled + 凭据 + 预算门禁），否则本功能保持不可用。'
+              + '原始错误：' + raw.slice(0, 160),
+            ), { code: 'fake-adapter-missing' });
+          }
+          throw e;
+        }
         if (signal?.aborted) throw new Error('分析已取消');
         assertAllowed();
         const prompt = '你是王朝首辅。只根据给定 JSON 做简短、可核对的态势分析；不得猜测未给出的会话正文。\n'
@@ -3730,7 +3762,7 @@ export async function apply(ctx, config) {
         requestBody: 'buffered',
         fetch: async (request) => {
           if (cfg.chiefAnalysisEnabled !== true) return json({ ok: false, code: 'disabled', error: '首辅分析未启用' }, 403);
-          // 真实路由准入必须在占用 requestId / 建立运行状态之前完成（P2-2：被拒请求不得污染幂等状态）。
+          // 真实路由准入必须在占用 requestId / 建立运行状态之前完成（被拒请求不得污染幂等状态）。
           let servedProvider = 'fake';
           let servedModel = 'fake-1';
           let servedMaxTokens = 512;
@@ -3826,6 +3858,9 @@ export async function apply(ctx, config) {
           } catch (error) {
             res = failAnalysis(chiefAnalysisState, { requestId: requestKey, attempt: begun.attempt, error });
             if (error?.code === 'audit-failed') res.code = 'audit-failed';
+            // 其它可识别失败原因（例如隔离假模型路由在本宿主不可用）也要带上机器可读 code，
+            // 否则客户端只能凭错误文本猜。
+            else if (typeof error?.code === 'string' && error.code) res.code = error.code;
           } finally {
             if (analysisAborts.get(requestKey) === controller) analysisAborts.delete(requestKey);
           }
@@ -3863,49 +3898,270 @@ export async function apply(ctx, config) {
           return json(reply, res.ok ? 200 : 409);
         },
       }));
+      // ---------------- 首辅消息投递：可靠回执 ----------------
+      // 实测缺陷：宿主 `followup` 只做「入队 + 唤醒 driver」，模型侧失败不回传到调用方，
+      // 于是消息根本没进会话时 `/role/message` 仍返回 ok:true，`role/stream` 永远空 ——
+      // 用户看到「已投递」，实际上什么也没发生。旧代码另外把 `h.agent.session.length` 当事件数，
+      // 而宿主 session 不是数组，该值恒为 null，让「到底进没进会话」变得不可判断。
+      //
+      // 状态机（对外只用这些值，未核对的一律不得说成成功）：
+      //   submitted       已提交给宿主（入队/唤醒），尚未核对进入会话
+      //   accepted        会话事件里已出现该 msgId（证明消息真的落库）
+      //   dispatched      已出现该消息之后的事件（首辅开始处理）
+      //   replied         该消息之后出现 assistant 消息
+      //   failed          投递本身失败（含门禁拒绝），带 code 与原因
+      //   cancelled       会话/请求已被取消或退休
+      //   stale-session   属于已退休/被替换的会话：迟到回复不得进入当前议事窗口
+      //   timeout-unknown 超过核对窗口仍未核对到：明确「未知」，不自动重发
+      const ROLE_DELIVERY_CONFIRM_MS = 1200;    // 单次投递后的核对窗口
+      const ROLE_DELIVERY_TIMEOUT_MS = 60000;   // 未核对状态的判定上限
+      const ROLE_DELIVERY_MAX = 200;
+      /** @type {Map<string, any>} */
+      const roleDeliveries = new Map();
+
+      // 会话对象形状：如实报出来，不再用 `session.length ?? null` 造一个无信息量的 null。
+      // 每一步独立 try/catch，遇到 getter 抛错就记成不可读，不深挖宿主内部结构。
+      const sessionShapeOf = (agent) => {
+        const out = {
+          kind: 'missing', lengthKnown: false, length: null,
+          eventsLength: null, hasAppend: false, keys: [],
+        };
+        let s = null;
+        try { s = agent?.session ?? null; } catch { return { ...out, kind: 'unreadable' }; }
+        if (!s) return out;
+        try { out.kind = typeof s; } catch {}
+        try { out.hasAppend = typeof s.append === 'function'; } catch {}
+        try { if (typeof s.length === 'number') { out.lengthKnown = true; out.length = s.length; } } catch {}
+        try { if (Array.isArray(s.events)) out.eventsLength = s.events.length; } catch {}
+        try { if (typeof s === 'object') out.keys = Object.keys(s).slice(0, 12); } catch {}
+        return out;
+      };
+
+      // 在会话原始事件里找注入消息的 id。宿主可能把它写成 user/message 的 data、包一层 message，
+      // 或塞进 messages 数组；这里只做窄匹配，命中即证明消息确实进了会话。
+      const eventHasMsgId = (e, msgId) => {
+        const d = e?.data ?? e;
+        if (!d || typeof d !== 'object') return false;
+        if (d.id === msgId) return true;
+        if (d.message && d.message.id === msgId) return true;
+        if (d.item && d.item.id === msgId) return true;
+        if (Array.isArray(d.messages) && d.messages.some((m) => m && m.id === msgId)) return true;
+        return false;
+      };
+
+      /** 由事件推导投递状态：submitted（未出现）→ accepted（出现）→ dispatched/replied（其后有事件/回复）。 */
+      const deliveryStateFromEvents = (events, msgId) => {
+        if (!Array.isArray(events) || typeof msgId !== 'string' || !msgId) return 'submitted';
+        let idx = -1;
+        for (let i = 0; i < events.length; i += 1) {
+          if (eventHasMsgId(events[i], msgId)) { idx = i; break; }
+        }
+        if (idx < 0) return 'submitted';
+        for (let i = idx + 1; i < events.length; i += 1) {
+          if (String(events[i]?.type ?? '') === 'assistant/message') return 'replied';
+        }
+        return events.length > idx + 1 ? 'dispatched' : 'accepted';
+      };
+
+      const publicDelivery = (entry) => ({
+        clientMessageId: entry.clientMessageId,
+        msgId: entry.msgId,
+        sessionId: entry.sessionId,
+        state: entry.state,
+        // delivered 只认核对结果：submitted 不算送达。
+        delivered: entry.state === 'accepted' || entry.state === 'dispatched' || entry.state === 'replied',
+        code: entry.code ?? null,
+        error: entry.error ?? null,
+        at: entry.at,
+        confirmedAt: entry.confirmedAt ?? null,
+        lastCheckedAt: entry.lastCheckedAt ?? null,
+        eventCount: entry.eventCount ?? null,
+        attempts: entry.attempts ?? 1,
+        retryable: entry.state === 'failed' || entry.state === 'cancelled',
+        autoResent: false,
+      });
+
+      const trimDeliveries = () => {
+        while (roleDeliveries.size > ROLE_DELIVERY_MAX) {
+          const oldest = roleDeliveries.keys().next();
+          if (oldest.done) break;
+          roleDeliveries.delete(oldest.value);
+        }
+      };
+
+      // 投递后核对：只有会话事件里真的出现该 msgId 才算 accepted，绝不由返回值推断。
+      const confirmDelivery = async (entry) => {
+        if (!entry || !entry.msgId || !entry.sessionId) return entry;
+        let snap = null;
+        try { snap = await ctx.sessionQuery.readSession(entry.sessionId); }
+        catch { entry.checkError = 'readSession 失败'; return entry; }
+        const events = Array.isArray(snap?.events) ? snap.events : [];
+        entry.eventCount = events.length;
+        entry.lastCheckedAt = Date.now();
+        const derived = deliveryStateFromEvents(events, entry.msgId);
+        const rank = { submitted: 0, accepted: 1, dispatched: 2, replied: 3 };
+        const cur = rank[entry.state] ?? 0;
+        const next = rank[derived] ?? 0;
+        if (next > cur) {
+          entry.state = derived;
+          if (derived === 'accepted' || derived === 'dispatched' || derived === 'replied') {
+            entry.confirmedAt = entry.confirmedAt ?? Date.now();
+          }
+        }
+        return entry;
+      };
+
+      // 有界核对：投递后最多等一个窗口（默认 1.2s），期间只读会话事件；
+      // 等不到就如实返回 submitted，交给前端按需再查一次，不做后台轮询风暴。
+      const confirmWithin = async (entry, budgetMs) => {
+        const deadline = Date.now() + budgetMs;
+        for (;;) {
+          await confirmDelivery(entry);
+          if (entry.state !== 'submitted' || Date.now() >= deadline) return entry;
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+      };
+
+      const recordDelivery = (clientMessageId, r) => {
+        if (typeof clientMessageId !== 'string' || !clientMessageId) return null;
+        const prev = roleDeliveries.get(clientMessageId) ?? null;
+        const entry = {
+          clientMessageId,
+          msgId: typeof r?.msgId === 'string' ? r.msgId : (prev?.msgId ?? null),
+          sessionId: typeof r?.sessionId === 'string' && r.sessionId ? r.sessionId : (state.chief?.sessionId ?? null),
+          state: r?.ok === true ? 'submitted' : 'failed',
+          code: r?.ok === true ? null : (r?.code ?? 'deliver-failed'),
+          error: r?.ok === true ? null : (r?.error ?? null),
+          at: Date.now(),
+          confirmedAt: null,
+          lastCheckedAt: null,
+          eventCount: null,
+          attempts: (prev?.attempts ?? 0) + 1,
+        };
+        roleDeliveries.set(clientMessageId, entry);
+        trimDeliveries();
+        return entry;
+      };
+
+      // 投递本体：wangchao_chief_append 与 /role/message 共用，守卫路径完全一致，不另开后门。
+      const injectChiefMessage = (text) => {
+        const content = String(text ?? '').slice(0, 2000);
+        if (!content.trim()) return { ok: false, code: 'empty-text', error: 'text 不能为空' };
+        const h = chiefHandle;
+        if (!h || !h.agent) return { ok: false, code: 'no-handle', error: '首辅会话未召见' };
+        if (!chiefReadonlyOk) return { ok: false, code: 'guard-unverified', error: '只读守卫未确认，拒绝追加消息' };
+        const msg = { id: newMsgId(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: content }] };
+        assertValidInjectMessage(msg);
+        let via = null;
+        // followup 会唤醒 driver 进入一轮模型请求；纯入队不会。
+        if (typeof h.agent.followup === 'function') { h.agent.followup(msg); via = 'followup'; }
+        else if (h.agent.inbox && typeof h.agent.inbox.append === 'function') {
+          h.agent.inbox.append(assertValidInjectTarget('next-turn'), msg); via = 'inbox';
+        } else if (h.agent.session && typeof h.agent.session.append === 'function') {
+          h.agent.session.append(msg); via = 'session.append';
+        } else {
+          return { ok: false, code: 'no-inject-path', error: '宿主 agent 没有可用的消息注入入口（followup / inbox / session.append 均不可用）' };
+        }
+        return { ok: true, msgId: msg.id, via, content };
+      };
+
       const computeRoleMessage = async (roleId, text) => {
         if (roleId !== 'chief') {
           return { ok: false, code: 'role-not-enabled', error: `角色 ${String(roleId)} 一期未启用（当前仅 chief 可对话）` };
         }
         if (cfg.observeOnly === true || stateLoadIssue) return { ok: false, code: 'unavailable', error: '观察模式或状态不可用，拒绝发送' };
         if (!state.chief?.sessionId || chiefBlockOf(state.chief.sessionId)) return { ok: false, code: 'chief-blocked', error: '首辅会话不可用或已被阻断' };
-        const content = String(text ?? '').slice(0, 2000);
-        if (!content.trim()) return { ok: false, code: 'empty-text', error: 'text 不能为空' };
-        // 与 wangchao_chief_append 完全相同的守卫路径，不另开后门。
-        const h = chiefHandle;
-        if (!h || !h.agent) return { ok: false, code: 'no-handle', error: '首辅会话未召见' };
-        if (!chiefReadonlyOk) return { ok: false, code: 'guard-unverified', error: '只读守卫未确认，拒绝追加消息' };
         if (state.chief && rulesTightenedSince(state.chief.rulesSnapshot, state.chief.rulesEpoch)) {
           return { ok: false, code: 'rules-tightened', error: '采集规则已收紧，旧会话不能继续发送；请新建首辅会话' };
         }
-        try {
-          const msg = { id: newMsgId(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: content }] };
-          assertValidInjectMessage(msg);
-          // followup 会唤醒 driver 进入一轮模型请求；纯 inbox 入队不会。
-          if (typeof h.agent.followup === 'function') h.agent.followup(msg);
-          else if (h.agent.inbox && typeof h.agent.inbox.append === 'function') h.agent.inbox.append(assertValidInjectTarget('next-turn'), msg);
-          else h.agent.session.append(msg);
-          return { ok: true, roleId, sessionId: state.chief?.sessionId ?? null, msgId: msg.id, length: h.agent.session.length ?? null };
-        } catch (e) {
-          return { ok: false, error: String(e?.message ?? e).slice(0, 200) };
+        // 没有可用模型路由时，投递必然被 driver 丢掉：必须在提交前明确拒绝，
+        // 而不是让它排队后静默消失（隔离测试路由显式配置了 fake 路由，不属于「未知」）。
+        const model = describeChiefModel();
+        if (model.modelUnknown === true) {
+          return {
+            ok: false, code: 'model-unavailable', retryable: false, model,
+            error: '首辅当前没有可用模型路由（provider/model 未知），消息未投递：请在宿主里给首辅会话选择模型或配置首辅模型后重试',
+          };
         }
+        let injected;
+        let shape;
+        try {
+          shape = sessionShapeOf(chiefHandle?.agent);
+          injected = injectChiefMessage(text);
+        } catch (e) {
+          return { ok: false, code: 'inject-failed', error: '注入失败：' + String(e?.message ?? e).slice(0, 200) };
+        }
+        if (!injected.ok) return injected;
+        return {
+          ok: true,
+          roleId,
+          sessionId: state.chief?.sessionId ?? null,
+          msgId: injected.msgId,
+          via: injected.via,
+          // 核算状态由路由层用会话事件核对后给出（publicDelivery），这里不预判是否送达。
+          length: shape.lengthKnown ? shape.length : null,
+          sessionShape: shape,
+          model,
+        };
       };
-      const deliverRoleMessage = (roleId, text, clientMessageId) => deliverOnce(roleMsgDedupe, {
-        clientMessageId, text, roleId, now: Date.now(), compute: () => computeRoleMessage(roleId, text),
-      });
-      // POST /role/message { roleId, text, clientMessageId } —— 独立窗口简化对话的投递口。
+      // POST /role/message { roleId, text, clientMessageId }；根据同一 ID 返回既有回执，不再次注入。
       disposers.push(fetchSvc.register({
         path: '/api/dsh-wangchao/role/message',
         methods: ['POST'],
         requestBody: 'buffered',
         fetch: async (request) => {
-          let body = {};
-          try { body = await request.json(); } catch { return json({ ok: false, error: '请求体不是有效 JSON' }, 400); }
-          if (!body || typeof body !== 'object') return json({ ok: false, error: '缺少请求对象' }, 400);
-          const roleId = String(body.roleId ?? '');
-          if (!roleId) return json({ ok: false, code: 'missing-role', error: '缺少 roleId' }, 400);
-          const r = await deliverRoleMessage(roleId, body.text, body.clientMessageId);
-          return json(r, r.ok ? 200 : (/not-enabled|empty-text|missing/.test(r.code ?? '') ? 400 : 409));
+          let body;
+          try { body = await request.json(); } catch { return json({ ok: false, state: 'failed', error: '请求体不是有效 JSON' }, 400); }
+          if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ ok: false, state: 'failed', error: '缺少请求对象' }, 400);
+          const { roleId, text, clientMessageId } = body;
+          const result = await deliverOnce(roleMsgDedupe, {
+            clientMessageId, text, roleId, now: Date.now(), compute: async () => {
+              const r = await computeRoleMessage(roleId, text);
+              const entry = recordDelivery(clientMessageId, r);
+              return { ...r, ...publicDelivery(entry) };
+            },
+          });
+          if (result.ok) {
+            const entry = roleDeliveries.get(clientMessageId);
+            if (entry?.sessionId !== state.chief?.sessionId) {
+              return json({ ok: false, state: 'cancelled', code: 'stale-session', error: '原议事会话已结束', clientMessageId }, 409);
+            }
+            await confirmWithin(entry, ROLE_DELIVERY_CONFIRM_MS);
+            if (entry.state !== 'submitted' && state.chief?.sessionId !== entry.sessionId) {
+              return json({ ok: false, state: 'cancelled', code: 'stale-session', error: '核对期间议事会话已替换', clientMessageId }, 409);
+            }
+            return json({ ...result, ...publicDelivery(entry) }, 202);
+          }
+          const status = result.code === 'model-unavailable' ? 503
+            : /not-enabled|empty-text|invalid-message/.test(result.code ?? '') ? 400 : 409;
+          return json({ state: 'failed', ...result }, status);
+        },
+      }));
+      disposers.push(fetchSvc.register({
+        path: '/api/dsh-wangchao/role/message/status',
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: async (request) => {
+          const id = new URL(request.url, 'http://localhost').searchParams.get('clientMessageId');
+          const entry = roleDeliveries.get(id);
+          if (!entry) return json({ ok: false, state: 'timeout-unknown', code: 'unknown-message', error: '没有可核实的回执，请勿自动重发' }, 404);
+          if (entry.sessionId !== (state.chief?.sessionId ?? null)) {
+            return json({ ok: false, state: 'cancelled', code: 'stale-session', error: '原议事会话已结束', clientMessageId: id }, 409);
+          }
+          const sid = entry.sessionId;
+          if (entry.state !== 'failed') {
+            if (chiefBlockOf(sid) || !chiefReadonlyOk || agentsGet(sid) !== chiefAgent) {
+              return json({ ok: false, state: 'cancelled', code: 'chief-blocked', error: '议事会话已不可用', clientMessageId: id }, 409);
+            }
+            await confirmDelivery(entry);
+            if (state.chief?.sessionId !== sid || chiefBlockOf(sid) || !chiefReadonlyOk || agentsGet(sid) !== chiefAgent) {
+              return json({ ok: false, state: 'cancelled', code: 'stale-session', error: '核对期间议事会话状态变化', clientMessageId: id }, 409);
+            }
+            if (entry.state !== 'replied' && Date.now() - entry.at >= ROLE_DELIVERY_TIMEOUT_MS) {
+              return json({ ok: true, ...publicDelivery(entry), state: 'timeout-unknown', error: '尚无可确认的最终结果，请核对后再决定是否重试' });
+            }
+          }
+          return json({ ok: true, ...publicDelivery(entry) });
         },
       }));
       // GET /role/stream —— 首辅会话的只读消息流水（不进采集范围，仅显式绑定当前 chief）。
@@ -4108,7 +4364,7 @@ export async function apply(ctx, config) {
   // 第一阶段首辅只开放 Leader 只读工具：这些工具自身按采集范围判权，
   // 不会因为文件读取或网页访问绕开会话排除范围。通用文件读取与网页工具
   // 等真实对话接通、确有需求时再单独设计可读范围。
-  // R5：删掉陈旧的 'wangchao_sessions' —— 该工具从未注册（只有 /api/dsh-wangchao/sessions
+  // 删掉陈旧的 'wangchao_sessions' —— 该工具从未注册（只有 /api/dsh-wangchao/sessions
   // 路由与 wangchao_status 的 sessions 字段），留在白名单里只会让 missingAllow 长期非空，
   // 把「采集部署里少一个工具」和「首辅读不到会话列表」混为一谈。
   const CHIEF_READONLY_ALLOW = new Set([
@@ -4193,7 +4449,7 @@ export async function apply(ctx, config) {
       if (rulesTightenedSince(c.rulesSnapshot, c.rulesEpoch)) {
         return { code: 'rules-tightened', reason: '采集规则在本次对话期间收紧，该首辅会话不能再继续；请重新召见。' };
       }
-      // fail-closed（R2 新增）：open=true 本身不等于「本进程已装好只读守卫」。
+      // fail-closed：open=true 本身不等于「本进程已装好只读守卫」。
       // 重启后、或被其他入口恢复的会话，本进程 chiefAgent 为空 / 守卫未验证时，
       // 若放行就是「一轮没有守卫的对话」。因此未知或未验证一律拒绝，不让 open=true 短路。
       // 只读守卫要求本进程持活 agent 才算可用（句柄路径已收敛为 agents.create/resume）。
@@ -4203,7 +4459,7 @@ export async function apply(ctx, config) {
           reason: '本进程尚未重新召见并验证只读守卫，已拒绝发送；请重新召见后再继续。',
         };
       }
-      // R5 加固（审查 A 发现）：open=true 且 chiefAgent/守卫就绪也不够——必须确认
+      // 加固（审查 A 发现）：open=true 且 chiefAgent/守卫就绪也不够——必须确认
       // agents 注册表里这个 sid 的 live agent 仍是本插件装了守卫的那一个。
       // 若旧 agent 被外部 dispose/替换、注册表里换成另一个未装守卫的 live agent，
       // 放行等于让无守卫的会话继续；可达性未验证，但校验成本为零，按 fail-closed 处理。
@@ -4224,7 +4480,7 @@ export async function apply(ctx, config) {
     if (knownEntry && knownEntry.orphaned === true) {
       return { code: 'orphaned-chief', reason: '该首辅会话登记不完整（孤儿记录），无法确认权限，已拒绝发送。' };
     }
-    // R3 修复（实测漏洞）：已登记、但不是当前首辅的历史会话（正常关闭后被新首辅取代）
+    // 修复（实测漏洞）：已登记、但不是当前首辅的历史会话（正常关闭后被新首辅取代）
     // 原先会落到「普通会话不干预」被放行。实测该会话由 DSH 原生恢复后**没有只读守卫**
     // （守卫只装在本进程的 chiefAgent 上），放行等于让卸任首辅绕过只读限制继续对话；
     // 且它的历史可能形成于更宽的采集规则下。因此登记过的历史首辅一律拒绝。
@@ -4242,7 +4498,7 @@ export async function apply(ctx, config) {
    *
    * 为什么需要它：客户端的 composer block 原先只按「当前 chief」计算，于是退休旧首辅、
    * 换代后的旧会话、孤儿登记打开时，输入框没有任何提示，但宿主 pre-step 照样拒绝
-   * （R2 u15：模型调用 7→7、消息未进会话）。这里给客户端一个「id → 原因」映射即可。
+   * （实测：模型调用 7→7、消息未进会话）。这里给客户端一个「id → 原因」映射即可。
    *
    * 身份边界（硬性）：
    * - 只认 state.chief.sessionId 与 state.chiefs[].sessionId 里**已登记**的 id，
@@ -4276,7 +4532,7 @@ export async function apply(ctx, config) {
   };
   /**
    * 首辅会话归组：召见/创建/恢复成功后把它挂到 cwd 对应的 workspace 下，
-   * 否则侧栏（按 workspace 分组的会话树）里找不到这个会话（R2 u11/u12）。
+   * 否则侧栏（按 workspace 分组的会话树）里找不到这个会话。
    *
    * 失败不阻塞召见，但必须留痕（state.chief.workspaceAttach），不能静默：
    * 未归组的会话仍然可用面板/「打开首辅会话」按钮导航过去，只是不在侧栏分组里。
@@ -4308,7 +4564,7 @@ export async function apply(ctx, config) {
       return { ...out, error: '归组失败：' + String(e?.message ?? e).slice(0, 240) };
     }
   };
-  // 句柄所有权（R4）：plugin = 本插件 create/resume 得来，可 dispose；
+  // 句柄所有权：plugin = 本插件 create/resume 得来，可 dispose；
   // host = 宿主持有的 live agent（用户在界面里打开过该会话后由宿主 resume），插件**不能** dispose 它。
   const setChiefRuntime = (agent, dispose, conv, ownership) => {
     chiefAgent = agent ?? null;
@@ -4535,7 +4791,7 @@ export async function apply(ctx, config) {
       // 归组结果（召见/恢复时写入）：ok=false 说明侧栏按 workspace 分组里看不到该会话，
       // 面板据此显示原因并提供「打开首辅会话」入口。
       workspaceAttach: c.workspaceAttach ?? null,
-      // R5：模型来源（主分支也要带——no-chief 分支已带，否则面板永远读不到）。
+      // 模型来源（主分支也要带——no-chief 分支已带，否则面板永远读不到）。
       ...describeChiefModel(),
     };
   };
@@ -4753,7 +5009,7 @@ export async function apply(ctx, config) {
       state.chief.rulesSnapshot = rulesSnapshotOf();
       state.chief.rulesEpoch = state.rulesEpoch ?? 0;
       // 归组：把新会话挂到 cwd 对应的 workspace，否则侧栏按工作区分组里根本找不到它
-      //（R2 u11/u12）。失败不阻塞召见，但结果如实记进状态，面板会显示原因。
+      // 失败不阻塞召见，但结果如实记进状态，面板会显示原因。
       state.chief.workspaceAttach = await attachChiefToWorkspace(id, cwd);
       if (att.conversationEnabled === true) {
         setChiefRuntime(agent, createdHandle ? createdHandle.dispose : null, true);
@@ -4802,7 +5058,7 @@ export async function apply(ctx, config) {
   };
   // 恢复两次、每次都立即释放：第二次不报「已被占用」即证明句柄已释放。
   // 恢复出来的 agent 与创建时不是同一个对象，必须重新安装守卫并验证。
-  // R4 修正：原先用 agentLoop.resume（返回 Agent，没有 dispose）→ 探针自己就泄漏一个
+  // 修正：原先用 agentLoop.resume（返回 Agent，没有 dispose）→ 探针自己就泄漏一个
   // 写句柄并留在 agents 注册表里，后续 summon 再 resume 必然撞 already-owned。
   // 现在只走 agents.resume 的可释放 handle；若该会话已被宿主/其它入口持有则复用并如实标注。
   const chiefResumeProbe = async () => {
@@ -4814,7 +5070,7 @@ export async function apply(ctx, config) {
     const svc = agentsResume();
     if (!svc) return { ok: false, error: 'agents 服务不可用：无法获取可释放句柄，已拒绝恢复探测' };
     // 探针运行前的真实运行时状态：复用了已有 agent（宿主或本插件自己 create 的）时不能清掉，
-    // 否则等于把「未被 dispose 的写句柄」从登记里抹掉 —— R3 版探针就是在这里泄漏句柄的。
+    // 否则等于把「未被 dispose 的写句柄」从登记里抹掉 —— 上一版探针就是在这里泄漏句柄的。
     const prevHandle = chiefHandle;
     const prevAgent = chiefAgent;
     const prevRoOk = chiefReadonlyOk;
@@ -4826,7 +5082,7 @@ export async function apply(ctx, config) {
       try {
         const live = agentsGet(c.sessionId);
         if (live) {
-          // R5：探针同样不能接管正在运行的 agent（装守卫会打断它正在进行的工具调用）。
+          // 探针同样不能接管正在运行的 agent（装守卫会打断它正在进行的工具调用）。
           if (live.status === 'running') {
             rounds.push({
               round: i + 1, ok: false, reusedLive: true, busy: true,
@@ -4932,7 +5188,7 @@ export async function apply(ctx, config) {
   };
 
   /**
-   * 复用宿主已持有的 live agent（R4 句柄修复的核心）。
+   * 复用宿主已持有的 live agent（句柄修复的核心）。
    *
    * 根因（实测证据见 REPORT.md）：`release` 只能 dispose **本插件** create/resume 得到的那个
    * AgentHandle。用户在界面里打开过该会话后，宿主（session controller / 界面侧）会自己
@@ -4949,7 +5205,7 @@ export async function apply(ctx, config) {
    *   cfg.chiefProvider/chiefModel —— 结果里如实标出实际来源，不假装是插件配置在跑。
    */
   const chiefReuseHostAgent = async (agent, opts = {}) => {
-    // R5：接管前先 fail-closed —— chiefAttach 里的 brief 注入是 await，期间若宿主界面
+    // 接管前先 fail-closed —— chiefAttach 里的 brief 注入是 await，期间若宿主界面
     // 抢先发送，pre-step 必须按「未就绪」拒绝，而不是沿用上一次的 open=true 放行。
     if (state.chief) state.chief.open = false;
     setChiefRuntime(agent, null, false, 'host');
@@ -5095,11 +5351,11 @@ export async function apply(ctx, config) {
       };
     }
     if (state.chief && state.chief.sessionId) {
-      // R4 修复：先查宿主 agents 注册表。界面打开过该会话后宿主会自己 resume 一个写句柄，
+      // 修复：先查宿主 agents 注册表。界面打开过该会话后宿主会自己 resume 一个写句柄，
       // 此时再 agents.resume 必然撞 SessionAlreadyOwnedError；直接复用宿主那个 agent 并重装守卫。
       const liveHost = agentsGet(state.chief.sessionId);
       if (liveHost) {
-        // R5：宿主 agent 正在跑一个轮次时不能接管：装只读守卫会让它后续工具调用被拒，
+        // 宿主 agent 正在跑一个轮次时不能接管：装只读守卫会让它后续工具调用被拒，
         // 等于破坏用户正在进行的任务；cancel 又是中断。两者都不能证明安全，所以拒绝并明确提示。
         if (liveHost.status === 'running') {
           return {
@@ -5123,7 +5379,7 @@ export async function apply(ctx, config) {
         };
       }
       try {
-        // R5：恢复期间先 fail-closed：resume/装配/简报注入都是 await，期间若宿主界面抢先
+        // 恢复期间先 fail-closed：resume/装配/简报注入都是 await，期间若宿主界面抢先
         // 发送，pre-step 必须拒绝；恢复成功后再打开。
         state.chief.open = false;
         // 恢复时也要带上 provider/model：否则模型装配缺少 {{model}}，turn 会直接失败
@@ -5180,7 +5436,7 @@ export async function apply(ctx, config) {
     return await chiefCreate();
   };
   // 释放句柄：会话记录保留，下次召见可恢复。
-  // 真实性要求（R4）：不能只用「把 open 改成 false / 清掉插件登记」来假装释放。
+  // 真实性要求：不能只用「把 open 改成 false / 清掉插件登记」来假装释放。
   // 判定依次是：本插件有没有可 dispose 的句柄 → dispose 是否成功 → 宿主注册表里是否仍有 live agent。
   //   - 宿主持有的 agent（界面打开过该会话后宿主自己 resume 的）：插件无权 dispose，
   //     如实报 released:false + ownership:'host'，下次召见复用宿主 agent（不再 resume 撞锁）；
@@ -5551,6 +5807,9 @@ export async function apply(ctx, config) {
       digest: cache && typeof cache.digest === 'string' ? cache.digest : null,
       digestSource: cache && typeof cache.source === 'string' ? cache.source : null,
       digestModel: cache && typeof cache.model === 'string' ? cache.model : null,
+      // 非模型来源必须能被 UI 直接识别：deterministic 只是本地统计序列化，
+      // 不能让人误读成「模型写的今日奏折」。
+      digestFallback: cache ? cache.fallback === true : false,
     };
   };
 
@@ -6194,7 +6453,7 @@ export async function apply(ctx, config) {
           parentCwd,
           censorateFrozen: state.censorateFreeze?.frozen === true,
         });
-      // P4-03：翰林院奏折缓存判定（不生成、不调模型），仅按当前实时授权会话子集计算；
+      // 翰林院奏折缓存判定（不生成、不调模型），仅按当前实时授权会话子集计算；
       // 权限索引不可用时 fail-closed 返回 unavailable，不退回全量 state.summaryRuns。
       const now = Date.now();
       let liveIndex = null;
@@ -6876,7 +7135,7 @@ export async function apply(ctx, config) {
     return out;
   };
 
-  // ---------------- 首辅交接（R8 连续阶段） ----------------
+  // ---------------- 首辅交接（连续阶段） ----------------
   // 只在当前首辅调用时构建/读取；构建与读取都按当前规则复核每个来源，规则在期间变化 → fail closed。
   // 不在关闭/退休时自动生成：避免把旧授权下的背景写入磁盘。旧首辅未生成时，新首辅得到明确的 no-handoff。
   handoffTools = createChiefHandoff({
@@ -7644,7 +7903,7 @@ export async function apply(ctx, config) {
   state.orphanChiefsRecovered = await recoverOrphanChiefs();
 
   // 启动轮小批量追平：实测 200 个会话耗时 197 秒，降到每批 20 个（约 20 秒）。
-  // 保持同步等待，确保启动完成时的采集状态是一致的；R5：startupReport 裁剪，不落盘未授权会话 id。
+  // 保持同步等待，确保启动完成时的采集状态是一致的；startupReport 裁剪，不落盘未授权会话 id。
   try {
     state.startupReport = trimPollReport(await poll('startup', { limit: 20 }));
   } catch (e) {

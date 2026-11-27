@@ -67,14 +67,18 @@ export async function run() {
     }
   });
 
+  // 契约：每一个注入消息构造点后都要经过 schema 校验。
+  // 按「构造点 → 后续 240 字符内出现校验」检查，不绑定具体函数名或调用顺序。
   runCase('接线：所有消息构造后都有 assertValidInjectMessage（brief / chief_append / role.message）', () => {
     const src = readFileSync(SRC, 'utf8');
-    const hits = src.match(/assertValidInjectMessage\(msg\);/g) ?? [];
-    assert.ok(hits.length >= 3, `assertValidInjectMessage 合法接线点应至少 3 处，实际 ${hits.length}`);
-    assert.match(src, /const msg = \{ id: newMsgId\(\)[\s\S]{0,200}?assertValidInjectMessage\(msg\)/);
-    assert.match(src, /const msg = \{ id: briefMsgId[\s\S]{0,200}?assertValidInjectMessage\(msg\)/);
-    // v0.4.0-alpha：role/message 的消息构造也走同一校验。
-    assert.match(src, /computeRoleMessage[\s\S]{0,1600}?assertValidInjectMessage\(msg\)/);
+    const constructed = [...src.matchAll(/const msg = \{\s*id:/g)];
+    assert.ok(constructed.length >= 3, `注入消息构造点应至少 3 处，实际 ${constructed.length}`);
+    for (const point of constructed) {
+      const window = src.slice(point.index, point.index + 240);
+      assert.match(window, /assertValidInjectMessage\(msg\)/, '消息构造后未校验 schema: ' + window.slice(0, 80));
+    }
+    assert.match(src, /const msg = \{ id: briefMsgId[\s\S]{0,240}?assertValidInjectMessage\(msg\)/);
+    assert.match(src, /path: '\/api\/dsh-wangchao\/role\/message'/);
   });
 
   return { name, cases };

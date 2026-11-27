@@ -37,3 +37,6 @@ Thumbs.db
 *-fixtures/
 fence-fixtures/
 
+# 临时产物回收站（按 dsh-guard 约定先移入这里再人工清理，不入版本库）
+.trash/
+

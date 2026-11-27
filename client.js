@@ -1408,6 +1408,10 @@ window.__ModuleLoader__.load({
         if (el && typeof el.scrollHeight === 'number') el.scrollTop = el.scrollHeight;
       }, [messages.length, sendMsg, streamNote]);
       const [sending, setSending] = React.useState(false);
+      // 上一条投递的回执：用户再次发送前必须先核对它到底有没有送达，
+      // 避免「重复发送一条可能已被接收的消息」（也绝不自动重发）。
+      const lastDeliveryRef = React.useRef(null);
+      const deliveryTimerRef = React.useRef(null);
       const [hanlinBusy, setHanlinBusy] = React.useState(false);
       const hanlinBusyRef = React.useRef(false);
       const [hanlinMsg, setHanlinMsg] = React.useState(null);
@@ -1461,7 +1465,7 @@ window.__ModuleLoader__.load({
       const [searchBusy, setSearchBusy] = React.useState(false);
       const [searchErr, setSearchErr] = React.useState(null);
       const searchGenRef = React.useRef(0);
-      // P1-1 灵感收件箱：与项目共用 editRevision 与授权边界，不新建第二套工作台。
+      // 灵感收件箱：与项目共用 editRevision 与授权边界，不新建第二套工作台。
       const [ideas, setIdeas] = React.useState(null);
       const [ideaDraft, setIdeaDraft] = React.useState('');
       const [ideaSource, setIdeaSource] = React.useState('');
@@ -1612,7 +1616,11 @@ window.__ModuleLoader__.load({
       }, []);
 
       React.useEffect(function () {
-        return function () { ackGenRef.current += 1; };
+        return function () {
+          ackGenRef.current += 1;
+          // 组件卸载后不再回调回执查询，避免对已卸载组件 setState。
+          if (deliveryTimerRef.current !== null) { clearTimeout(deliveryTimerRef.current); deliveryTimerRef.current = null; }
+        };
       }, []);
 
       React.useEffect(function () {
@@ -2200,9 +2208,68 @@ window.__ModuleLoader__.load({
           .catch(function () { if (gen === opGenRef.current) { setOpBusy(false); setOpError(true); setOpMsg('网络错误：草稿已保留'); } return false; });
       };
 
+      // 投递回执文案：只有后端核对到「进了会话」才允许说送达；
+      // submitted / timeout-unknown 一律说成未确认，failed 必须给原因。
+      const describeDelivery = function (d) {
+        const st = d && d.state;
+        if (st === 'replied') return '首辅已回复';
+        if (st === 'dispatched') return '首辅已开始处理';
+        if (st === 'accepted') return '已送达首辅会话，等待回复';
+        if (st === 'submitted') return '已提交，尚未确认进入会话（不会自动重发；可稍后核对）';
+        if (st === 'timeout-unknown') return '结果未知：没取到确认，也不会自动重发，请先核对再决定';
+        if (st === 'stale-session') return '原议事会话已结束：该消息的迟到回复不会进入当前议事窗口';
+        if (st === 'cancelled') return '已取消：' + ((d && d.error) || '会话或只读守卫已不可用');
+        if (st === 'failed') return '投递失败：' + ((d && d.error) || (d && d.code) || '未知原因');
+        return null;
+      };
+      const fetchDelivery = function (clientMessageId) {
+        return fetch('/api/dsh-wangchao/role/message/status?clientMessageId=' + encodeURIComponent(clientMessageId),
+          { headers: { accept: 'application/json' } })
+          .then(function (r) {
+            return r.json().catch(function () { return null; })
+              .then(function (j) { return { status: r.status, json: j }; });
+          })
+          .then(function (res) {
+            const j = res.json || {};
+            if (j && j.state) return j;
+            return { state: 'timeout-unknown', error: '回执查询失败（HTTP ' + res.status + '）' };
+          })
+          .catch(function (e) {
+            return { state: 'timeout-unknown', error: '回执查询失败：' + (e && e.message ? e.message : e) };
+          });
+      };
+      const refreshLastDelivery = function () {
+        const last = lastDeliveryRef.current;
+        if (!last || !last.clientMessageId) return Promise.resolve(null);
+        return fetchDelivery(last.clientMessageId).then(function (j) {
+          const st = (j && j.state) || 'timeout-unknown';
+          lastDeliveryRef.current = { clientMessageId: last.clientMessageId, state: st, at: last.at };
+          const t = describeDelivery(j);
+          if (t) setSendMsg(t);
+          return j;
+        });
+      };
+      const isTerminalDelivery = function (st) {
+        return st === 'replied' || st === 'failed' || st === 'cancelled' || st === 'stale-session' || st === 'timeout-unknown';
+      };
       const send = function () {
         const value = String(text || '').trim();
         if (!value || sending) return;
+        // 重试前先核查上一条：未到终态就先查状态，查到已送达时要求用户再按一次确认，
+        // 不做静默重复投递。
+        const last = lastDeliveryRef.current;
+        if (last && !isTerminalDelivery(last.state)) {
+          setSending(true);
+          setSendMsg('正在核对上一条投递…');
+          refreshLastDelivery().then(function (j) {
+            setSending(false);
+            const st = (j && j.state) || 'timeout-unknown';
+            if (st === 'accepted' || st === 'dispatched' || st === 'submitted' || st === 'replied') {
+              setSendMsg('上一条已经送出（' + (describeDelivery(j) || st) + '）。确认要再发一条吗？再点一次发送即重复投递。');
+            }
+          }).catch(function () { setSending(false); });
+          return;
+        }
         // 乐观渲染：用户气泡 + 思考占位立即出现，轮询临时切到 1.2s；
         // 只有读到新的 assistant 消息才撤销占位并恢复低频，不靠“发送成功”冒充回复已到。
         const before = latestSeqRef.current;
@@ -2231,10 +2298,28 @@ window.__ModuleLoader__.load({
             function () { return { status: r.status, json: null }; });
         }).then(function (res) {
           const j = res.json || {};
-          if (j.ok === true) {
-            setSendMsg('已投递给首辅（' + (j.msgId || '无 msgId') + '）。回复会出现在本页流水；完整会话可点「在主窗展开」查看。');
-            setText('');
+          if (j.ok === true && j.state) {
+            lastDeliveryRef.current = { clientMessageId: clientMessageId, state: j.state, at: Date.now() };
+            const note = describeDelivery(j);
+            if (j.state === 'accepted' || j.state === 'dispatched' || j.state === 'replied') {
+              // 只有核对到真的进了会话才允许清空输入框
+              setSendMsg(note || '已送达');
+              setText('');
+            } else {
+              // submitted / 其它未确认：保留输入框原文，用户可自行决定是否重发
+              setSendMsg(note || '已提交（未确认）');
+            }
+            if (deliveryTimerRef.current !== null) clearTimeout(deliveryTimerRef.current);
+            deliveryTimerRef.current = setTimeout(function () {
+              deliveryTimerRef.current = null;
+              refreshLastDelivery();
+            }, 2500);
+          } else if (j.ok === true) {
+            // 后端没返回回执状态（旧版本）：绝不说成送达
+            lastDeliveryRef.current = { clientMessageId: clientMessageId, state: 'submitted', at: Date.now() };
+            setSendMsg('已提交，但本宿主没有返回回执状态，无法确认是否进入会话（不会自动重发）');
           } else {
+            lastDeliveryRef.current = null;
             failSend('投递失败：' + (j.error || ('HTTP ' + res.status)));
           }
         }).catch(function (e) {
@@ -4406,7 +4491,7 @@ window.__ModuleLoader__.load({
               ? ((chief.open ? '已创建' : '已关闭') + ' · ' + (chief.cwd || '无 cwd'))
               : '未创建')),
           chief.exists && ov.observeOnly !== true ? h('div', { className: 'ldr-dim' }, 'id ' + String(chief.sessionId || '').slice(0, 28)) : null,
-          // R5：模型来源如实展示。复用宿主 agent 时的 provider/model 来自宿主那次 resume，
+          // 模型来源如实展示。复用宿主 agent 时的 provider/model 来自宿主那次 resume，
           // 读不到就显示未知，不用插件配置冒充。
           chief.exists && ov.observeOnly !== true ? h('div', { className: 'ldr-dim' },
             (function () {
@@ -4420,11 +4505,11 @@ window.__ModuleLoader__.load({
               }
               return '模型：' + String(chief.provider) + ' / ' + String(chief.model || '默认') + '（' + label + '）';
             })()) : null,
-          // R5：宿主持有句柄时说明释放语义，避免用户以为 release 已经把句柄还回去了。
+          // 宿主持有句柄时说明释放语义，避免用户以为 release 已经把句柄还回去了。
           chief.exists && chief.handleOwnership === 'host' ? h('div', { className: 'ldr-dim' },
             '句柄：由宿主持有（插件无法 dispose；release 会如实报 released:false，需在界面关闭该会话或重启）') : null,
           // 归组结果：侧栏按 workspace 分组，未归组时必须说清原因，
-          // 否则就是「召见了首辅，但侧栏找不到」（R2 u11/u12）。
+          // 否则就是「召见了首辅，但侧栏找不到」。
           chief.exists && ov.observeOnly !== true ? h('div', { className: 'ldr-dim' },
             (function () {
               const wa = chief.workspaceAttach;
@@ -4831,7 +4916,7 @@ window.__ModuleLoader__.load({
       }, 'leader-ui: composer block cleanup');
       // 常驻 composer block 同步：不依赖御书房面板是否挂载。
       // 判定来源是服务端 GET /chief 的 blockedSessions —— 与宿主 agent/pre-step 的
-      // chiefBlockOf 同源，覆盖退休旧首辅、换代后的旧会话、孤儿登记（R2 u15 的缺口）。
+      // chiefBlockOf 同源，覆盖退休旧首辅、换代后的旧会话、孤儿登记。
       // 不再只看「当前 chief」：旧首辅不是当前 chief，但同样会被宿主拒绝。
       // 请求失败或字段缺失时不猜测，保留上一次提示（清空会让输入框看起来可用）。
       ctx.effect(function () {

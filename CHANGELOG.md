@@ -1,5 +1,28 @@
 # 变更记录
 
+## 0.5.0-alpha.5.2 — 2026-11-27
+
+> 本版只修宿主可靠性与发布前审计，不发布、不改 dist-tag、不建 Release。
+
+### 修复
+
+- **翰林院摘要不再依赖宿主 fake provider adapter**：隔离 fake 路由改为把 runner 置空，走 `generateHanlinDigest` 内置的确定性统计摘要。返回与审计明确标记 `source=deterministic`、`model=null`、`fallback=true`，报告条与奏折抽屉同时显示该来源；真实模型路由（预算与身份门禁）保持原样。真实宿主上原先对 `llm.prepareCall({provider:'fake'})` 报「no adapter registered」并返回 502，本版不再出现。
+- **首辅分析的同源 fake 分支**：只在本宿主确实没有 fake adapter 时，把错误转成 `fake-adapter-missing` 的明确不可用状态与配置指引，不伪造分析正文、不放宽真实模型门禁。
+- **首辅消息可靠回执**：`/role/message` 不再用「followup 没抛错」冒充送达。投递后以会话事件里是否出现 msgId 核对，返回 `submitted / accepted / dispatched / replied / failed / cancelled / stale-session / timeout-unknown` 八态；新增 `GET /role/message/status?clientMessageId=` 供用户主动核对。没有可用模型路由时明确 503 `model-unavailable`，消息不投递。同一 `clientMessageId` 幂等复用，不自动重发。`fresh` / 退休后旧会话的消息回执返回 `stale-session`，迟到回复不进入新议事窗口。前端只在核对到进入会话时显示「已送达」并清空输入框；未确认保留原文，失败给出具体原因，重复发送前先核对上一条回执。
+- **`fresh` / `summon` 回执基线修正**：会话 id 实际在 `chief.sessionId`，旧代码读顶层 `sessionId` 恒为 undefined，导致 `summonedAtSeq` 与 `newSessionId` 从不返回，前端无法正确切换议事窗口基线。
+- **会话形状诊断**：不再把 `h.agent.session.length ?? null` 当成事件数；改为如实返回 `sessionShape`（kind / lengthKnown / eventsLength / hasAppend / keys），让「消息是否进入会话」可以从会话事件读取，而不是猜。
+
+### 发布前审计
+
+- 内部编号扫描从 `F-0x` / `AP-0x` 两位以下扩展到 `F-xx` / `AP-xx`（含 `-R1` 子阶段）/ `D-xx` / `R-xx` / `P<n>-<n>` / `R<n>`，带正例自证与串扰形态误报护栏；范围仍是 `package.json files` 白名单（公开文档与运行时源码）。公开包 53 个文件零命中。
+- 公开源码里 52 处历史内部编号已从注释中清掉，技术说明原文保留；详见交付报告 before/after 清单。
+
+### 验证
+
+- `node checks/all.mjs`：7/7 组、50 条断言通过。
+- 离线测试：详见交付报告中的真实统计（逐文件带超时执行）。
+- 隔离宿主验证：详见 `AP09-ALPHA52-HOST-RELIABILITY-DELIVERY.md`；未取得实证的项目标 `NOT VERIFIED`。
+
 ## 0.5.0-alpha.5.1 — 2026-11-26
 
 ### 修复
