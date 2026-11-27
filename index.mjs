@@ -3964,37 +3964,73 @@ export async function apply(ctx, config) {
       };
 
       // 投递后核对：只有会话事件里真的出现该 msgId 才算 accepted，绝不由返回值推断。
-      // 另外读宿主自己的轮次结论：无凭据/模型失败时 driver 会在 prepareRequest 阶段就抛错，
-      // user/message 根本不会写入，但 turn/end 会带 reason='error' 落下来 —— 这是
-      // 「模型不可用」唯一的宿主级事实，用它把回执从 submitted 升级为明确的 failed。
+      // 返回 { state, idx }：idx 是该消息在事件数组里的位置，作为后续「只看它之后发生了
+      // 什么」的因果锚点。用序号而不是时间窗口，是因为时间法在两种情况下会出错：
+      //   ① 事件没有 time 字段（历史事件、某些宿主版本）→ 无法判断先后；
+      //   ② 上一轮的 turn/end 可能落在投递前 1 秒内 → 被误当成本轮结论。
       const deliveryStateFromEvents = (events, entry) => {
         const msgId = entry?.msgId;
         const text = entry?.text;
         const sinceMs = entry?.at;
-        if (!Array.isArray(events)) return 'submitted';
+        if (!Array.isArray(events)) return { state: 'submitted', idx: -1 };
         let idx = -1;
         for (let i = 0; i < events.length; i += 1) {
           if (eventHasMsg(events[i], msgId, text, sinceMs)) { idx = i; break; }
         }
-        if (idx < 0) return 'submitted';
+        if (idx < 0) return { state: 'submitted', idx: -1 };
         for (let i = idx + 1; i < events.length; i += 1) {
-          if (String(events[i]?.type ?? '') === 'assistant/message') return 'replied';
+          if (String(events[i]?.type ?? '') === 'assistant/message') return { state: 'replied', idx };
         }
-        return events.length > idx + 1 ? 'dispatched' : 'accepted';
+        return { state: events.length > idx + 1 ? 'dispatched' : 'accepted', idx };
       };
 
-      /** 取「投递之后」最后一次轮次结论；拿不到时间戳的事件不参与判断。 */
-      const lastTurnEndSince = (events, sinceMs) => {
+      /**
+       * 取「该消息之后」最后一次轮次结论。
+       *
+       * 有因果锚点（fromIdx >= 0）时：只扫描 fromIdx 之后的事件，与时间戳无关。
+       * 这正是 B2 要修的跨轮次污染 —— 上一轮的 turn/end 在锚点之前，永远看不到。
+       *
+       * 无锚点（fromIdx < 0，消息还没落盘）时：退回按时间判断，但**必须要求事件带时间**。
+       * 没有时间戳的事件无法证明它发生在我们投递之后，一律跳过，不能纳入判断。
+       */
+      const turnEndAfter = (events, fromIdx, sinceMs) => {
         if (!Array.isArray(events)) return null;
         let found = null;
-        for (const e of events) {
+        for (let i = 0; i < events.length; i += 1) {
+          const e = events[i];
           if (String(e?.type ?? '') !== 'turn/end') continue;
-          const t = Number.isFinite(e?.time) ? e.time : null;
-          if (t !== null && t < sinceMs - 1000) continue;
+          if (fromIdx >= 0) {
+            if (i <= fromIdx) continue;
+          } else {
+            const t = Number.isFinite(e?.time) ? e.time : null;
+            if (t === null) continue;                       // 无时间戳：证不了先后，跳过
+            if (t < sinceMs) continue;                      // 早于本次投递：跳过
+          }
           const reason = e?.data?.reason ?? e?.reason ?? null;
           if (reason && typeof reason === 'object') found = reason;
         }
         return found;
+      };
+
+      // 把宿主轮次结论翻译成回执状态。消息是否已落盘（fromIdx >= 0）会影响措辞，
+      // 但结论都是 failed / cancelled —— 绝不因为「消息进去了」就当成执行成功。
+      const applyTurnOutcome = (entry, reason, fromIdx) => {
+        if (!reason) return;
+        const landed = fromIdx >= 0;
+        const where = landed ? '消息已进入会话，但' : '消息未能写入会话，且';
+        if (reason.kind === 'error') {
+          const raw = reason.error && typeof reason.error === 'object' ? reason.error : null;
+          const code = raw && typeof raw.code === 'string' && raw.code ? raw.code : 'model-error';
+          const message = raw && typeof raw.message === 'string' && raw.message
+            ? raw.message : (typeof reason.error === 'string' ? reason.error : '首辅轮次失败');
+          entry.state = 'failed';
+          entry.code = 'round-failed:' + code.slice(0, 60);
+          entry.error = where + '首辅处理失败：' + message.slice(0, 300);
+        } else if (reason.kind === 'aborted') {
+          entry.state = 'cancelled';
+          entry.code = 'round-aborted';
+          entry.error = where + '首辅处理被中止';
+        }
       };
 
       const publicDelivery = (entry) => ({
@@ -4032,7 +4068,7 @@ export async function apply(ctx, config) {
         const events = Array.isArray(snap?.events) ? snap.events : [];
         entry.eventCount = events.length;
         entry.lastCheckedAt = Date.now();
-        const derived = deliveryStateFromEvents(events, entry);
+        const { state: derived, idx } = deliveryStateFromEvents(events, entry);
         const rank = { submitted: 0, accepted: 1, dispatched: 2, replied: 3 };
         const cur = rank[entry.state] ?? 0;
         const next = rank[derived] ?? 0;
@@ -4042,22 +4078,23 @@ export async function apply(ctx, config) {
             entry.confirmedAt = entry.confirmedAt ?? Date.now();
           }
         }
-        // 仍未见 msgId 时，看宿主自己的轮次结论：error → 明确 failed（带原因），
-        // aborted → cancelled。只在没有更强证据（accepted 以上）时采用。
-        if (entry.state === 'submitted') {
-          const reason = lastTurnEndSince(events, entry.at);
-          if (reason && reason.kind === 'error') {
-            const raw = reason.error && typeof reason.error === 'object' ? reason.error : null;
-            const code = raw && typeof raw.code === 'string' && raw.code ? raw.code : 'model-error';
-            const message = raw && typeof raw.message === 'string' && raw.message
-              ? raw.message : (typeof reason.error === 'string' ? reason.error : '首辅轮次失败');
-            entry.state = 'failed';
-            entry.code = 'round-failed:' + code.slice(0, 60);
-            entry.error = '首辅处理这条消息失败：' + message.slice(0, 300);
-          } else if (reason && reason.kind === 'aborted') {
-            entry.state = 'cancelled';
-            entry.code = 'round-aborted';
-            entry.error = '首辅处理这条消息时被中止';
+        // 轮次结论：只要还没到 replied，就要看宿主自己的判定。
+        // 原来是 `entry.state === 'submitted'` 才查 —— 于是「消息已落盘、宿主随后写
+        // turn/end(error)」会停在 dispatched，错误原因完全看不到。现在 accepted /
+        // dispatched 也会把 error/aborted 翻译成 failed / cancelled。
+        if (entry.state !== 'replied' && entry.state !== 'failed' && entry.state !== 'cancelled') {
+          const reason = turnEndAfter(events, idx, entry.at);
+          if (reason) {
+            // 消息没落盘（idx < 0）时没有因果锚点，只能靠时间推移推断。
+            // 但同一会话里若还能找到别的投递的 msgId，这条 turn/end 究竟属于谁就无从判断 ——
+            // 此时宁可不采用，也不能把别人的失败挂到这条头上。
+            // 判据用「事件里能否找到别人的 msgId」而不是「别人当前状态」：
+            // 后者取决于查询顺序，先查的那条已经翻成 failed，后来者就找不到同伴了。
+            const ambiguous = idx < 0 && [...roleDeliveries.values()].some(
+              (other) => other !== entry && other.sessionId === entry.sessionId && other.msgId
+                && events.some((ev) => eventHasMsg(ev, other.msgId, other.text, other.at)),
+            );
+            if (!ambiguous) applyTurnOutcome(entry, reason, idx);
           }
         }
         return entry;

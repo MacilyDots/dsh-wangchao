@@ -1,0 +1,216 @@
+{
+  "generatedAt": "2026-11-27T23:14:13.6194600+08:00",
+  "note": "模块生命周期登记。ACTIVE=生产路径引用；FROZEN=有意冻结；DEPRECATED=有替代；DEAD 不应存在（发现即失败）",
+  "modules": [
+    {
+      "name": "authorize-tier.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 3940
+    },
+    {
+      "name": "boundary.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 7752
+    },
+    {
+      "name": "censorate-enforce.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 12261
+    },
+    {
+      "name": "censorate.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 17180
+    },
+    {
+      "name": "chief-analysis.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 20622
+    },
+    {
+      "name": "chief-project-tools.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 4265
+    },
+    {
+      "name": "client.js",
+      "lifecycle": "ACTIVE",
+      "bytes": 320441
+    },
+    {
+      "name": "deliver-dedupe.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 1512
+    },
+    {
+      "name": "exec-admission.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 8085
+    },
+    {
+      "name": "exec-budget.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 23550
+    },
+    {
+      "name": "exec-gate-wiring.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 30762
+    },
+    {
+      "name": "exec-lifecycle.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 12148
+    },
+    {
+      "name": "exec-policy.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 19842
+    },
+    {
+      "name": "governance.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 5558
+    },
+    {
+      "name": "handoff.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 27037
+    },
+    {
+      "name": "hanlin-digest.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 7547
+    },
+    {
+      "name": "idea-capture.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 9672
+    },
+    {
+      "name": "index.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 450138
+    },
+    {
+      "name": "live-stream.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 4735
+    },
+    {
+      "name": "mini-react.js",
+      "lifecycle": "ACTIVE",
+      "bytes": 19474
+    },
+    {
+      "name": "multi-task.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 7073
+    },
+    {
+      "name": "orphan-tmp.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 769
+    },
+    {
+      "name": "plan-tools.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 11544
+    },
+    {
+      "name": "poll.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 24341
+    },
+    {
+      "name": "project-facts.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 10921
+    },
+    {
+      "name": "project-http-adapter.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 13646
+    },
+    {
+      "name": "project-increments.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 7197
+    },
+    {
+      "name": "project-projector.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 10049
+    },
+    {
+      "name": "project-routes.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 5769
+    },
+    {
+      "name": "project-store.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 46627
+    },
+    {
+      "name": "real-model-readiness.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 9464
+    },
+    {
+      "name": "recovery-pack.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 10352
+    },
+    {
+      "name": "report-bar.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 3499
+    },
+    {
+      "name": "research-search.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 8624
+    },
+    {
+      "name": "role-stream.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 3431
+    },
+    {
+      "name": "roles.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 2863
+    },
+    {
+      "name": "sanitize.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 4764
+    },
+    {
+      "name": "session-lineage.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 4098
+    },
+    {
+      "name": "state.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 18321
+    },
+    {
+      "name": "summary-verify.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 2488
+    },
+    {
+      "name": "task-store.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 29103
+    },
+    {
+      "name": "writer-epoch-fencing.mjs",
+      "lifecycle": "ACTIVE",
+      "bytes": 32224
+    }
+  ]
+}

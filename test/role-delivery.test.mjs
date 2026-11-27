@@ -148,7 +148,7 @@ test('宿主轮次失败（无凭据/模型错误）时回执明确 failed 并�
   assert.equal(r.status, 202);
   assert.equal(r.body.state, 'failed', JSON.stringify(r.body));
   assert.equal(r.body.code, 'round-failed:MISSING_CREDENTIAL');
-  assert.match(r.body.error, /首辅处理这条消息失败/);
+  assert.match(r.body.error, /首辅处理失败/, '要能看出是轮次失败');
   assert.match(r.body.error, /no API key/);
   assert.equal(r.body.delivered, false);
   const s = await status(f, 'c-round-failed');
@@ -161,4 +161,103 @@ test('会话形状异常时，回执不猜成功：会话里没有该 msgId 就�
   assert.equal(r.body.state, 'submitted');
   assert.equal(r.body.length, null);
   assert.equal(r.body.sessionShape.lengthKnown, false);
+});
+
+// ---------------------------------------------------------------------------
+// B2 补充回归：轮次结论的因果归属
+//
+// 三个已确认的缺陷：
+//   ① 事件没有 time 字段时，旧实现把它当成「投递之后」的结论 → 误判 failed；
+//   ② 上一轮的 turn/end 落在投递前 1 秒回溯窗口内 → 被当成本轮结论；
+//   ③ 消息已落盘、宿主随后写 turn/end(error) → 回执停在 dispatched，看不到原因。
+// 修法是把因果锚点从「时间窗口」换成「事件序号」，所以每条都用序号关系构造现场。
+// ---------------------------------------------------------------------------
+
+test('无时间戳的历史 turn/end 不得参与判断（证不了先后就跳过）', async t => {
+  const f = await fixture(t, { followupLands: false });
+  // 这条错误没有 time 字段：既无法证明它发生在投递之后，也无法证明之前。
+  f.events.set(f.sid, [{ type: 'turn/end', data: { turn: 9, reason: { kind: 'error', error: { code: 'TIMELESS_OLD', message: '无时间戳的旧错误' } } } }]);
+  const r = await message(f, 'c-timeless');
+  assert.equal(r.status, 202, JSON.stringify(r.body));
+  assert.equal(r.body.state, 'submitted', '没有时间戳不等于发生在本轮之后');
+  assert.equal(r.body.code, null);
+  assert.equal(r.body.delivered, false);
+});
+
+test('上一轮的轮次错误不得污染本轮（时间回溯窗口不构成因果）', async t => {
+  const f = await fixture(t, { followupLands: false });
+  const at = Date.now();
+  // 投递前 400 毫秒落下的错误 —— 落在旧实现的 sinceMs-1000 窗口内，但明显属于上一轮。
+  f.events.set(f.sid, [{ type: 'turn/end', time: at - 400, data: { turn: 1, reason: { kind: 'error', error: { code: 'PREV_ROUND', message: '上一轮的失败' } } } }]);
+  const r = await message(f, 'c-prev-round');
+  assert.equal(r.body.state, 'submitted', JSON.stringify(r.body));
+  assert.equal(r.body.code, null, '不得把上一轮的 code 挂到本轮');
+  assert.ok(!String(r.body.error ?? '').includes('上一轮'));
+});
+
+test('消息已落盘、宿主随后报轮次失败：必须从 accepted 升到 failed 并带原因', async t => {
+  const f = await fixture(t);
+  const r = await message(f, 'c-landed-then-failed');
+  assert.equal(r.body.state, 'accepted', JSON.stringify(r.body));
+  assert.equal(r.body.delivered, true);
+  // 宿主接受消息后，driver 在真正跑模型时失败，写 turn/end(error)。
+  f.events.set(f.sid, [...(f.events.get(f.sid) ?? []), {
+    type: 'turn/end', time: Date.now() + 1,
+    data: { turn: 2, reason: { kind: 'error', error: { code: 'RUNTIME_FAIL', message: '首辅轮次执行失败' } } },
+  }]);
+  const s = await status(f, 'c-landed-then-failed');
+  assert.equal(s.body.state, 'failed', JSON.stringify(s.body));
+  assert.equal(s.body.code, 'round-failed:RUNTIME_FAIL');
+  assert.match(s.body.error, /消息已进入会话/, '要说明消息其实进去了，避免误判成没送达');
+  assert.match(s.body.error, /首辅轮次执行失败/);
+  assert.equal(s.body.delivered, false, '派发成功不等于执行成功');
+  assert.equal(s.body.retryable, true);
+});
+
+test('已有回复之后才出现的轮次失败不降级（replied 是终态）', async t => {
+  const f = await fixture(t);
+  const r = await message(f, 'c-partial-reply');
+  f.events.set(f.sid, [
+    ...(f.events.get(f.sid) ?? []),
+    { type: 'assistant/message', data: { content: [{ type: 'text', text: '部分回答' }], id: 'reply-partial' } },
+    { type: 'turn/end', time: Date.now() + 1, data: { turn: 3, reason: { kind: 'error', error: { code: 'TAIL_FAIL', message: '收尾阶段失败' } } } },
+  ]);
+  const s = await status(f, 'c-partial-reply');
+  assert.equal(s.body.state, 'replied', JSON.stringify(s.body));
+  assert.equal(s.body.delivered, true);
+  assert.equal(s.body.code, null, '已经回答了就不该被后来的 error 覆盖');
+  assert.ok(r.body.msgId);
+});
+
+test('重复与迟到的 turn/end：取消息之后最后一条，重复不改变结论', async t => {
+  const f = await fixture(t, { followupLands: false });
+  f.events.set(f.sid, [
+    { type: 'turn/end', time: Date.now() + 1, data: { turn: 1, reason: { kind: 'aborted', error: null } } },
+    { type: 'turn/end', time: Date.now() + 2, data: { turn: 2, reason: { kind: 'aborted', error: null } } },
+  ]);
+  const r = await message(f, 'c-duplicate');
+  assert.equal(r.body.state, 'cancelled', JSON.stringify(r.body));
+  assert.equal(r.body.code, 'round-aborted');
+  const s = await status(f, 'c-duplicate');
+  assert.equal(s.body.state, 'cancelled');
+  assert.equal(s.body.error, '消息未能写入会话，且首辅处理被中止');
+});
+
+test('并发投递各自归因：一条失败不得污染另一条的结论', async t => {
+  const f = await fixture(t, { followupLands: false });
+  const a = await message(f, 'c-concurrent-a', '消息甲');
+  const b = await message(f, 'c-concurrent-b', '消息乙');
+  assert.equal(a.body.state, 'submitted');
+  assert.equal(b.body.state, 'submitted');
+  // 只让甲的消息落盘，并在它之后写入错误。
+  f.events.set(f.sid, [
+    { type: 'user/message', data: { id: a.body.msgId, content: [{ type: 'text', text: '消息甲' }] } },
+    { type: 'turn/end', time: Date.now() + 1, data: { turn: 1, reason: { kind: 'error', error: { code: 'A_FAILED', message: '甲的处理失败' } } } },
+  ]);
+  const sa = await status(f, 'c-concurrent-a');
+  const sb = await status(f, 'c-concurrent-b');
+  assert.equal(sa.body.state, 'failed', JSON.stringify(sa.body));
+  assert.equal(sa.body.code, 'round-failed:A_FAILED');
+  assert.equal(sb.body.state, 'submitted', '乙没有落盘，不得继承甲的错误');
+  assert.equal(sb.body.code, null);
 });
