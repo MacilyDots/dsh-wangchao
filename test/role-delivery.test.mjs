@@ -139,6 +139,22 @@ test('没有可用模型路由：明确失败，消息未投递', async t => {
   assert.equal(f.injects, before);
 });
 
+test('宿主轮次失败（无凭据/模型错误）时回执明确 failed 并带原因，不冒充 submitted', async t => {
+  const f = await fixture(t, { followupLands: false });
+  // 真实宿主：prepareRequest 阶段就抛 MISSING_CREDENTIAL，user/message 不写入，
+  // 但 turn/end 会带 reason={kind:'error', error:{code, message}} 落下来。
+  f.events.set(f.sid, [{ type: 'turn/end', time: Date.now() + 1, data: { turn: 1, reason: { kind: 'error', error: { code: 'MISSING_CREDENTIAL', message: 'no API key for provider route "deepseek-official"' } } } }]);
+  const r = await message(f, 'c-round-failed');
+  assert.equal(r.status, 202);
+  assert.equal(r.body.state, 'failed', JSON.stringify(r.body));
+  assert.equal(r.body.code, 'round-failed:MISSING_CREDENTIAL');
+  assert.match(r.body.error, /首辅处理这条消息失败/);
+  assert.match(r.body.error, /no API key/);
+  assert.equal(r.body.delivered, false);
+  const s = await status(f, 'c-round-failed');
+  assert.equal(s.body.state, 'failed');
+});
+
 test('会话形状异常时，回执不猜成功：会话里没有该 msgId 就保持 submitted', async t => {
   const f = await fixture(t, { followupLands: false });
   const r = await message(f, 'c-shape');

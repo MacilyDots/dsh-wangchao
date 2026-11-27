@@ -3937,30 +3937,64 @@ export async function apply(ctx, config) {
         return out;
       };
 
-      // 在会话原始事件里找注入消息的 id。宿主可能把它写成 user/message 的 data、包一层 message，
-      // 或塞进 messages 数组；这里只做窄匹配，命中即证明消息确实进了会话。
-      const eventHasMsgId = (e, msgId) => {
+      // 在会话原始事件里找注入消息。两级判据：
+      //   ① 宿主保留了注入 id（msgId 出现在 data / data.message / messages 里）；
+      //   ② 宿主重排/重分配 id 时，退回到「同一时间窗口内、文本完全一致的一条 user/message」。
+      // 只用于内部核对，不写日志、不进回执正文。
+      const messageTextOf = (d) => {
+        const blocks = Array.isArray(d?.content) ? d.content
+          : Array.isArray(d?.message?.content) ? d.message.content : null;
+        if (!blocks) return null;
+        const parts = blocks.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text);
+        return parts.length ? parts.join('\n') : null;
+      };
+      const eventHasMsg = (e, msgId, text, sinceMs) => {
         const d = e?.data ?? e;
         if (!d || typeof d !== 'object') return false;
-        if (d.id === msgId) return true;
-        if (d.message && d.message.id === msgId) return true;
-        if (d.item && d.item.id === msgId) return true;
-        if (Array.isArray(d.messages) && d.messages.some((m) => m && m.id === msgId)) return true;
-        return false;
+        if (msgId) {
+          if (d.id === msgId) return true;
+          if (d.message && d.message.id === msgId) return true;
+          if (d.item && d.item.id === msgId) return true;
+          if (Array.isArray(d.messages) && d.messages.some((m) => m && m.id === msgId)) return true;
+        }
+        if (String(e?.type ?? '') !== 'user/message' || typeof text !== 'string' || !text) return false;
+        const t = Number.isFinite(e?.time) ? e.time : null;
+        if (t !== null && Number.isFinite(sinceMs) && t < sinceMs - 1000) return false;
+        return messageTextOf(d) === text;
       };
 
-      /** 由事件推导投递状态：submitted（未出现）→ accepted（出现）→ dispatched/replied（其后有事件/回复）。 */
-      const deliveryStateFromEvents = (events, msgId) => {
-        if (!Array.isArray(events) || typeof msgId !== 'string' || !msgId) return 'submitted';
+      // 投递后核对：只有会话事件里真的出现该 msgId 才算 accepted，绝不由返回值推断。
+      // 另外读宿主自己的轮次结论：无凭据/模型失败时 driver 会在 prepareRequest 阶段就抛错，
+      // user/message 根本不会写入，但 turn/end 会带 reason='error' 落下来 —— 这是
+      // 「模型不可用」唯一的宿主级事实，用它把回执从 submitted 升级为明确的 failed。
+      const deliveryStateFromEvents = (events, entry) => {
+        const msgId = entry?.msgId;
+        const text = entry?.text;
+        const sinceMs = entry?.at;
+        if (!Array.isArray(events)) return 'submitted';
         let idx = -1;
         for (let i = 0; i < events.length; i += 1) {
-          if (eventHasMsgId(events[i], msgId)) { idx = i; break; }
+          if (eventHasMsg(events[i], msgId, text, sinceMs)) { idx = i; break; }
         }
         if (idx < 0) return 'submitted';
         for (let i = idx + 1; i < events.length; i += 1) {
           if (String(events[i]?.type ?? '') === 'assistant/message') return 'replied';
         }
         return events.length > idx + 1 ? 'dispatched' : 'accepted';
+      };
+
+      /** 取「投递之后」最后一次轮次结论；拿不到时间戳的事件不参与判断。 */
+      const lastTurnEndSince = (events, sinceMs) => {
+        if (!Array.isArray(events)) return null;
+        let found = null;
+        for (const e of events) {
+          if (String(e?.type ?? '') !== 'turn/end') continue;
+          const t = Number.isFinite(e?.time) ? e.time : null;
+          if (t !== null && t < sinceMs - 1000) continue;
+          const reason = e?.data?.reason ?? e?.reason ?? null;
+          if (reason && typeof reason === 'object') found = reason;
+        }
+        return found;
       };
 
       const publicDelivery = (entry) => ({
@@ -3998,7 +4032,7 @@ export async function apply(ctx, config) {
         const events = Array.isArray(snap?.events) ? snap.events : [];
         entry.eventCount = events.length;
         entry.lastCheckedAt = Date.now();
-        const derived = deliveryStateFromEvents(events, entry.msgId);
+        const derived = deliveryStateFromEvents(events, entry);
         const rank = { submitted: 0, accepted: 1, dispatched: 2, replied: 3 };
         const cur = rank[entry.state] ?? 0;
         const next = rank[derived] ?? 0;
@@ -4006,6 +4040,24 @@ export async function apply(ctx, config) {
           entry.state = derived;
           if (derived === 'accepted' || derived === 'dispatched' || derived === 'replied') {
             entry.confirmedAt = entry.confirmedAt ?? Date.now();
+          }
+        }
+        // 仍未见 msgId 时，看宿主自己的轮次结论：error → 明确 failed（带原因），
+        // aborted → cancelled。只在没有更强证据（accepted 以上）时采用。
+        if (entry.state === 'submitted') {
+          const reason = lastTurnEndSince(events, entry.at);
+          if (reason && reason.kind === 'error') {
+            const raw = reason.error && typeof reason.error === 'object' ? reason.error : null;
+            const code = raw && typeof raw.code === 'string' && raw.code ? raw.code : 'model-error';
+            const message = raw && typeof raw.message === 'string' && raw.message
+              ? raw.message : (typeof reason.error === 'string' ? reason.error : '首辅轮次失败');
+            entry.state = 'failed';
+            entry.code = 'round-failed:' + code.slice(0, 60);
+            entry.error = '首辅处理这条消息失败：' + message.slice(0, 300);
+          } else if (reason && reason.kind === 'aborted') {
+            entry.state = 'cancelled';
+            entry.code = 'round-aborted';
+            entry.error = '首辅处理这条消息时被中止';
           }
         }
         return entry;
@@ -4030,6 +4082,7 @@ export async function apply(ctx, config) {
           msgId: typeof r?.msgId === 'string' ? r.msgId : (prev?.msgId ?? null),
           sessionId: typeof r?.sessionId === 'string' && r.sessionId ? r.sessionId : (state.chief?.sessionId ?? null),
           state: r?.ok === true ? 'submitted' : 'failed',
+          text: typeof r?.text === 'string' ? r.text : null,
           code: r?.ok === true ? null : (r?.code ?? 'deliver-failed'),
           error: r?.ok === true ? null : (r?.error ?? null),
           at: Date.now(),
@@ -4062,7 +4115,7 @@ export async function apply(ctx, config) {
         } else {
           return { ok: false, code: 'no-inject-path', error: '宿主 agent 没有可用的消息注入入口（followup / inbox / session.append 均不可用）' };
         }
-        return { ok: true, msgId: msg.id, via, content };
+        return { ok: true, msgId: msg.id, via, content, text: content };
       };
 
       const computeRoleMessage = async (roleId, text) => {
@@ -4098,6 +4151,8 @@ export async function apply(ctx, config) {
           sessionId: state.chief?.sessionId ?? null,
           msgId: injected.msgId,
           via: injected.via,
+          // 带一份投递原文用于「宿主重排 id 时的文本比对」；只留在内存回执里，不落盘。
+          text: injected.text,
           // 核算状态由路由层用会话事件核对后给出（publicDelivery），这里不预判是否送达。
           length: shape.lengthKnown ? shape.length : null,
           sessionShape: shape,
